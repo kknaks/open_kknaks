@@ -132,12 +132,25 @@ worker = ClaudeWorker(
     # Claude Code CLI 실행 환경 (워커 기본값)
     work_dir="/my/backend",
     claude_bin=None,                      # PATH 자동 탐색
+    
+    # LLM / 프롬프트 설정
     model="sonnet",
-    allowed_tools=["Read", "Bash(git log *)", "Bash(git diff *)"],
-    append_system_prompt="You are a backend error analyst. Be concise.",
-    max_turns=10,
-    permission_mode="default",
-    bare=True,
+    system_prompt=None,                   # 시스템 프롬프트 전체 교체 (--system-prompt)
+    append_system_prompt="You are a backend error analyst. Be concise.",  # 기본 프롬프트에 추가 (--append-system-prompt)
+    max_turns=10,                         # 에이전트 최대 턴 수 (--max-turns, 없으면 무제한)
+    max_budget_usd=1.0,                   # 작업당 비용 상한 (--max-budget-usd)
+    effort="high",                        # 응답 품질 수준 (--effort: low/medium/high/max)
+    json_schema=None,                     # 구조화 출력 스키마 (--json-schema)
+    
+    # 도구 / 권한
+    allowed_tools=["Read", "Bash(git log *)", "Bash(git diff *)"],  # --allowedTools
+    disallowed_tools=None,                # 금지 도구 (--disallowedTools)
+    permission_mode="default",            # default/plan/bypassPermissions/auto
+    
+    # 세션 / MCP
+    mcp_config=None,                      # MCP 서버 설정 파일 경로 (--mcp-config)
+    add_dirs=None,                        # 추가 접근 디렉토리 (--add-dir)
+    bare=True,                            # 최소 모드: hooks/LSP/plugin 스킵
     
     # 워커 설정
     concurrency=4,                        # 동시 Claude Code 프로세스 수
@@ -211,7 +224,7 @@ async def _process_task(self, task: Task):
         task.status = TaskStatus.DONE
         task.result = result.output
         task.exit_code = result.exit_code
-        task.session_id = result.session_id
+        task.result_session_id = result.session_id
         task.usage = result.usage
         task.finished_at = datetime.utcnow()
         await self.broker.update_task(task)
@@ -253,6 +266,78 @@ stop() 호출
   │
   └─ 4) broker.close()
 ```
+
+### 4.4 Executor — CLI 플래그 빌드
+
+Worker 기본값과 Task 오버라이드를 병합한 뒤, Claude Code CLI 플래그로 변환한다.
+
+```python
+def _build_command(self, task: Task, config: MergedConfig) -> list[str]:
+    cmd = [self.claude_bin, "-p", task.prompt]
+    cmd += ["--output-format", "stream-json"]
+    
+    # 필수
+    if config.bare:
+        cmd.append("--bare")
+    
+    # LLM / 프롬프트
+    if config.model:
+        cmd += ["--model", config.model]
+    if config.system_prompt:
+        cmd += ["--system-prompt", config.system_prompt]
+    if config.append_system_prompt:
+        cmd += ["--append-system-prompt", config.append_system_prompt]
+    if config.max_turns:
+        cmd += ["--max-turns", str(config.max_turns)]
+    if config.max_budget_usd:
+        cmd += ["--max-budget-usd", str(config.max_budget_usd)]
+    if config.effort:
+        cmd += ["--effort", config.effort]
+    if config.json_schema:
+        cmd += ["--json-schema", config.json_schema]
+    
+    # 도구 / 권한
+    if config.allowed_tools:
+        cmd += ["--allowedTools"] + config.allowed_tools
+    if config.disallowed_tools:
+        cmd += ["--disallowedTools"] + config.disallowed_tools
+    if config.permission_mode == "bypassPermissions":
+        cmd.append("--dangerously-skip-permissions")
+    elif config.permission_mode and config.permission_mode != "default":
+        cmd += ["--permission-mode", config.permission_mode]
+    
+    # 세션 / 환경
+    if task.session_id:
+        cmd += ["--resume", task.session_id]
+    if config.mcp_config:
+        cmd += ["--mcp-config", config.mcp_config]
+    if config.add_dirs:
+        cmd += ["--add-dir"] + config.add_dirs
+    
+    return cmd
+```
+
+**CLI 플래그 전체 매핑:**
+
+| 설정 필드 | CLI 플래그 | 비고 |
+|---|---|---|
+| `model` | `--model` | |
+| `system_prompt` | `--system-prompt` | 전체 교체 |
+| `append_system_prompt` | `--append-system-prompt` | 기본 프롬프트에 추가 |
+| `max_turns` | `--max-turns` | 없으면 무제한 |
+| `max_budget_usd` | `--max-budget-usd` | 비용 상한 |
+| `effort` | `--effort` | low/medium/high/max |
+| `json_schema` | `--json-schema` | 구조화 출력 |
+| `allowed_tools` | `--allowedTools` | |
+| `disallowed_tools` | `--disallowedTools` | |
+| `permission_mode` | `--permission-mode` / `--dangerously-skip-permissions` | |
+| `session_id` | `--resume` | 세션 이어가기 |
+| `mcp_config` | `--mcp-config` | MCP 서버 연결 |
+| `add_dirs` | `--add-dir` | 추가 접근 디렉토리 |
+| `bare` | `--bare` | 최소 모드 |
+| `context` | stdin 파이프 | `echo context \| claude -p` |
+| (항상) | `--output-format stream-json` | 파싱용 고정 |
+| (항상) | `-p` | 비대화형 모드 |
 
 ---
 
@@ -426,13 +511,27 @@ class Task(BaseModel):
     priority: Priority = Priority.NORMAL
     delay_until: datetime | None = None
     
-    # 실행 옵션 (None이면 Worker 기본값)
+    # 실행 옵션 (None이면 Worker 기본값 사용)
     work_dir: str | None = None
-    model: str | None = None
-    allowed_tools: list[str] | None = None
-    append_system_prompt: str | None = None
-    max_turns: int | None = None
-    permission_mode: str | None = None
+    
+    # LLM / 프롬프트
+    model: str | None = None                        # --model
+    system_prompt: str | None = None                # --system-prompt (전체 교체)
+    append_system_prompt: str | None = None         # --append-system-prompt (추가)
+    max_turns: int | None = None                    # --max-turns
+    max_budget_usd: float | None = None             # --max-budget-usd
+    effort: str | None = None                       # --effort (low/medium/high/max)
+    json_schema: str | None = None                  # --json-schema (구조화 출력)
+    
+    # 도구 / 권한
+    allowed_tools: list[str] | None = None          # --allowedTools
+    disallowed_tools: list[str] | None = None       # --disallowedTools
+    permission_mode: str | None = None              # --permission-mode
+    
+    # 세션 / 환경
+    session_id: str | None = None                   # --resume (세션 이어가기)
+    mcp_config: str | None = None                   # --mcp-config
+    add_dirs: list[str] | None = None               # --add-dir
     bare: bool | None = None
     timeout: int | None = None
     
@@ -444,7 +543,7 @@ class Task(BaseModel):
     result: str | None = None
     error: str | None = None
     exit_code: int | None = None
-    session_id: str | None = None
+    result_session_id: str | None = None            # 실행 후 반환된 세션 ID (이어가기용)
     usage: TokenUsage | None = None
     
     # 배치
