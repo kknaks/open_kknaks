@@ -2,7 +2,7 @@
 
 > v1 PRD를 폐기하고 상용 레벨로 재설계한다.
 > Dramatiq 분석 결과를 반영하되, Claude Code CLI 전용 특성에 맞게 변형한다.
-> **불필요한 추상화를 제거하고 실제 구현에 필요한 것만 남긴다.**
+> **과도한 추상화는 제거하되, 확장 가능한 인터페이스는 유지한다.**
 
 ---
 
@@ -12,7 +12,7 @@
 2. **멀티 큐 라우팅** — 워커가 특정 큐만 소비. 큐 = 작업 유형/환경 단위
 3. **at-least-once delivery** — 작업은 ack 전까지 유실되지 않음
 4. **수평 확장** — 같은 큐에 워커 N대 붙이면 처리량 N배
-5. **Redis 직접 구현** — 브로커 추상화 없음. Redis 하나만 제대로 만든다
+5. **브로커 추상화** — AbstractBroker 인터페이스 제공. 기본 구현은 Redis. InMemory는 제공하지 않음 (테스트는 mock)
 
 ---
 
@@ -256,12 +256,50 @@ stop() 호출
 
 ---
 
-## 5. RedisBroker
+## 5. Broker
 
-추상 클래스 없이 Redis 직접 구현. 나중에 다른 브로커가 필요하면 그때 인터페이스를 추출한다.
+### 5.1 AbstractBroker (인터페이스)
 
 ```python
-class RedisBroker:
+class AbstractBroker(ABC):
+    # 큐
+    async def enqueue(self, task: Task, *, delay: int | None = None) -> None: ...
+    async def dequeue(self, queue_names: list[str], timeout: float = 1.0) -> Task | None: ...
+    async def ack(self, queue_name: str, task_id: str) -> None: ...
+    async def nack(self, queue_name: str, task_id: str) -> None: ...
+    async def requeue(self, queue_name: str, task_ids: list[str]) -> None: ...
+    
+    # 상태/결과
+    async def get_task(self, task_id: str) -> Task | None: ...
+    async def update_task(self, task: Task) -> None: ...
+    
+    # 스트리밍
+    async def publish_chunk(self, task_id: str, chunk: StreamEvent) -> None: ...
+    async def subscribe_chunks(self, task_id: str) -> AsyncIterator[StreamEvent]: ...
+    
+    # DLQ
+    async def list_dlq(self, queue_name: str, limit: int = 100) -> list[Task]: ...
+    async def retry_from_dlq(self, queue_name: str, task_id: str) -> None: ...
+    async def purge_dlq(self, queue_name: str) -> None: ...
+    
+    # 워커 관리
+    async def register_worker(self, worker_id: str, queues: list[str]) -> None: ...
+    async def heartbeat(self, worker_id: str) -> None: ...
+    async def queue_size(self, queue_name: str) -> int: ...
+    
+    # 미들웨어 시그널
+    async def emit_before(self, signal: str, *args, **kwargs) -> None: ...
+    async def emit_after(self, signal: str, *args, **kwargs) -> None: ...
+    
+    # 라이프사이클
+    async def connect(self) -> None: ...
+    async def close(self) -> None: ...
+```
+
+### 5.2 RedisBroker (기본 구현)
+
+```python
+class RedisBroker(AbstractBroker):
     def __init__(
         self,
         url: str = "redis://localhost:6379",
@@ -489,10 +527,8 @@ class RetriesMiddleware(Middleware):
 
 ## 8. CLI
 
-`open-kknaks worker`만 제공. 나머지는 Python API로.
-
 ```bash
-# 워커 실행
+# === 워커 실행 ===
 open-kknaks worker \
     --broker redis://localhost:6379 \
     --namespace myapp \
@@ -506,21 +542,25 @@ OPEN_KKNAKS_BROKER_URL=redis://localhost:6379 \
 OPEN_KKNAKS_NAMESPACE=myapp \
 OPEN_KKNAKS_QUEUES=error-analysis,general \
 open-kknaks worker
-```
 
-큐/DLQ/Task 관리는 Python API:
-```python
-# 큐 사이즈
-size = await broker.queue_size("error-analysis")
+# === 큐 관리 ===
+open-kknaks queue list                         # 선언된 큐 목록 + 사이즈
+open-kknaks queue size error-analysis          # 특정 큐 대기 작업 수
+open-kknaks queue purge error-analysis         # 큐 비우기
 
-# DLQ 조회
-dlq_tasks = await broker.list_dlq("error-analysis")
+# === DLQ 관리 ===
+open-kknaks dlq list error-analysis            # 실패 작업 목록
+open-kknaks dlq retry error-analysis --task-id abc123   # 재시도
+open-kknaks dlq retry error-analysis --all     # 전부 재시도
+open-kknaks dlq purge error-analysis           # DLQ 비우기
 
-# DLQ에서 재시도
-await broker.retry_from_dlq("error-analysis", task_id)
+# === 작업 조회 ===
+open-kknaks task status abc123                 # 상태 조회
+open-kknaks task result abc123                 # 결과 조회
+open-kknaks task cancel abc123                 # 취소
 
-# Task 취소
-await client.cancel(task_id)
+# === 워커 상태 ===
+open-kknaks worker list                        # 활성 워커 목록
 ```
 
 ---
@@ -533,7 +573,17 @@ open_kknaks/
 ├── client.py                # ClaudeClient (프로듀서)
 ├── task.py                  # Task, TaskStatus, Priority, TaskResult, TokenUsage, StreamEvent
 ├── batch.py                 # BatchRunner, BatchStatus
-├── broker.py                # RedisBroker (단일 파일)
+├── broker/
+│   ├── __init__.py          # AbstractBroker export
+│   ├── base.py              # AbstractBroker (인터페이스)
+│   ├── redis.py             # RedisBroker (기본 구현)
+│   └── lua/                 # Redis Lua 스크립트
+│       ├── enqueue.lua
+│       ├── dequeue.lua
+│       ├── ack.lua
+│       ├── nack.lua
+│       ├── requeue.lua
+│       └── maintenance.lua
 ├── worker/
 │   ├── __init__.py
 │   ├── worker.py            # ClaudeWorker
@@ -544,28 +594,25 @@ open_kknaks/
 │   ├── logging.py           # LoggingMiddleware
 │   ├── retries.py           # RetriesMiddleware
 │   └── timeout.py           # TimeoutMiddleware
-├── lua/                     # Redis Lua 스크립트
-│   ├── enqueue.lua
-│   ├── dequeue.lua
-│   ├── ack.lua
-│   ├── nack.lua
-│   ├── requeue.lua
-│   └── maintenance.lua
 ├── mcp/
 │   ├── __init__.py
 │   ├── server.py            # MCPServer
 │   └── __main__.py          # python -m open_kknaks.mcp
-├── cli.py                   # CLI (worker 서브커맨드만)
+├── cli/
+│   ├── __init__.py
+│   ├── main.py              # CLI 진입점 (typer)
+│   ├── worker_cmd.py        # worker 서브커맨드
+│   ├── queue_cmd.py         # queue 서브커맨드
+│   ├── dlq_cmd.py           # dlq 서브커맨드
+│   └── task_cmd.py          # task 서브커맨드
 ├── exceptions.py            # 예외 계층
 └── py.typed
 ```
 
 **v1 대비 제거된 것:**
-- `broker/base.py` (AbstractBroker) → 없음. RedisBroker 직접
-- `broker/memory.py` (InMemoryBroker) → 없음. 테스트는 mock
+- `broker/memory.py` (InMemoryBroker) → 테스트는 mock
 - `config.py` (ExecutionConfig) → Worker에서 직접 병합
 - `middleware/cost.py`, `rate_limit.py`, `callback.py`, `age_limit.py` → 유저 구현
-- `cli/` 디렉토리 (4개 서브커맨드) → `cli.py` 단일 파일 (worker만)
 - `worker/process_manager.py` → executor.py에 통합
 
 ---
@@ -576,13 +623,13 @@ open_kknaks/
 |---|---|---|
 | 진입점 | `ClaudeRunner` 일체형 | `ClaudeClient` + `ClaudeWorker` 분리 |
 | 큐 | 단일 | 멀티 큐 라우팅 |
-| 브로커 | AbstractBroker + InMemory + Redis | **RedisBroker만** |
+| 브로커 | AbstractBroker + InMemory + Redis | **AbstractBroker + RedisBroker** (InMemory 제거) |
 | DLQ | 없음 | 큐별 DLQ |
 | ack/nack | ack만 | ack + nack + requeue |
 | 셧다운 | SIGTERM만 | requeue + 실행 중 대기 |
 | 헬스체크 | 없음 | heartbeat + 좀비 감지 |
 | 미들웨어 시그널 | 14개 | **6개** |
 | 기본 미들웨어 | 7개 | **3개** (Logging, Retries, Timeout) |
-| CLI | 4개 서브커맨드 | **worker만** |
+| CLI | 없음 | **4개 서브커맨드** (worker/queue/dlq/task) |
 | 설정 | TOML + 환경변수 + Python | **Python + 환경변수** |
-| 추상화 | AbstractBroker, AbstractExecutor, ExecutionConfig | **없음. 구체 클래스 직접** |
+| 추상화 | AbstractBroker, AbstractExecutor, ExecutionConfig | **AbstractBroker 유지**, ExecutionConfig/AbstractExecutor 제거 |
