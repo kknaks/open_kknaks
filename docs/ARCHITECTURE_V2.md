@@ -16,16 +16,18 @@
 
 ---
 
-## 2. 컴포넌트 (5개만)
+## 2. 핵심 컴포넌트
 
 ```
 ClaudeClient ──enqueue──▶ RedisBroker ◀──dequeue── ClaudeWorker
                               │                        │
+                              │                   ClaudeConfig
+                              │                        │
                               │                   Executor
                               │                   (claude -p)
                          Middleware
-                     (Logging, Retries,
-                         Timeout)
+                   (Logging, Retries, Timeout,
+                    Cost, RateLimit, Callback)
 ```
 
 전체 구조:
@@ -129,28 +131,24 @@ worker = ClaudeWorker(
     # 어떤 큐를 소비할지
     queues=["error-analysis", "general"],
     
-    # Claude Code CLI 실행 환경 (워커 기본값)
-    work_dir="/my/backend",
-    claude_bin=None,                      # PATH 자동 탐색
-    
-    # LLM / 프롬프트 설정
-    model="sonnet",
-    system_prompt=None,                   # 시스템 프롬프트 전체 교체 (--system-prompt)
-    append_system_prompt="You are a backend error analyst. Be concise.",  # 기본 프롬프트에 추가 (--append-system-prompt)
-    max_turns=10,                         # 에이전트 최대 턴 수 (--max-turns, 없으면 무제한)
-    max_budget_usd=1.0,                   # 작업당 비용 상한 (--max-budget-usd)
-    effort="high",                        # 응답 품질 수준 (--effort: low/medium/high/max)
-    json_schema=None,                     # 구조화 출력 스키마 (--json-schema)
-    
-    # 도구 / 권한
-    allowed_tools=["Read", "Bash(git log *)", "Bash(git diff *)"],  # --allowedTools
-    disallowed_tools=None,                # 금지 도구 (--disallowedTools)
-    permission_mode="default",            # default/plan/bypassPermissions/auto
-    
-    # 세션 / MCP
-    mcp_config=None,                      # MCP 서버 설정 파일 경로 (--mcp-config)
-    add_dirs=None,                        # 추가 접근 디렉토리 (--add-dir)
-    bare=True,                            # 최소 모드: hooks/LSP/plugin 스킵
+    # Claude Code 설정 (분리된 객체)
+    claude=ClaudeConfig(
+        work_dir="/my/backend",
+        claude_bin=None,                      # PATH 자동 탐색
+        model="sonnet",
+        system_prompt=None,                   # 전체 교체 (--system-prompt)
+        append_system_prompt="You are a backend error analyst. Be concise.",
+        max_turns=10,
+        max_budget_usd=1.0,
+        effort="high",                        # low/medium/high/max
+        json_schema=None,
+        allowed_tools=["Read", "Bash(git log *)", "Bash(git diff *)"],
+        disallowed_tools=None,
+        permission_mode="default",
+        mcp_config=None,
+        add_dirs=None,
+        bare=True,
+    ),
     
     # 워커 설정
     concurrency=4,                        # 동시 Claude Code 프로세스 수
@@ -495,7 +493,47 @@ FOR worker IN HGETALL {ns}:workers:
 
 ---
 
-## 6. Task 모델
+## 6. ClaudeConfig
+
+Worker의 Claude Code CLI 실행 환경을 담는 설정 객체. 여러 Worker에서 재사용 가능.
+
+```python
+class ClaudeConfig(BaseModel):
+    # 환경
+    work_dir: str = "."
+    claude_bin: str | None = None         # None이면 PATH 자동 탐색
+    
+    # LLM / 프롬프트
+    model: str | None = None              # --model
+    system_prompt: str | None = None      # --system-prompt (전체 교체)
+    append_system_prompt: str | None = None  # --append-system-prompt (추가)
+    max_turns: int | None = None          # --max-turns
+    max_budget_usd: float | None = None   # --max-budget-usd
+    effort: str | None = None             # --effort (low/medium/high/max)
+    json_schema: str | None = None        # --json-schema
+    
+    # 도구 / 권한
+    allowed_tools: list[str] | None = None      # --allowedTools
+    disallowed_tools: list[str] | None = None   # --disallowedTools
+    permission_mode: str = "default"             # --permission-mode
+    
+    # 세션 / 환경
+    mcp_config: str | None = None         # --mcp-config
+    add_dirs: list[str] | None = None     # --add-dir
+    bare: bool = True                     # --bare
+```
+
+**재사용 예시:**
+```python
+config = ClaudeConfig(model="sonnet", work_dir="/my/project", effort="high")
+
+worker_a = ClaudeWorker(broker=broker, queues=["queue-a"], claude=config, concurrency=4)
+worker_b = ClaudeWorker(broker=broker, queues=["queue-b"], claude=config, concurrency=2)
+```
+
+---
+
+## 7. Task 모델
 
 ```python
 class Task(BaseModel):
@@ -560,11 +598,11 @@ class Task(BaseModel):
 
 ---
 
-## 7. 미들웨어
+## 8. 미들웨어
 
 시그널 6개. 기본 제공 3개.
 
-### 7.1 시그널
+### 8.1 시그널
 
 ```python
 class Middleware:
@@ -587,11 +625,18 @@ class Middleware:
     async def after_worker_shutdown(self, broker, worker) -> None: ...
 ```
 
-### 7.2 기본 제공 미들웨어 (3개)
+### 8.2 기본 제공 미들웨어 (6개)
 
-**LoggingMiddleware** — 작업 시작/완료/실패 structlog 로깅
+| 미들웨어 | 설명 | 기본 활성화 |
+|---|---|---|
+| `LoggingMiddleware` | 작업 시작/완료/실패 structlog 로깅 | ✅ |
+| `RetriesMiddleware` | 지수 백오프 재시도 + DLQ | ✅ |
+| `TimeoutMiddleware` | subprocess SIGTERM → 5초 → SIGKILL | ✅ |
+| `CostTrackingMiddleware` | stream-json에서 토큰/비용 파싱 → `task.usage`에 저장 | ✅ |
+| `RateLimitMiddleware` | 분당 최대 요청 수 제한 (API rate limit 방어) | ❌ (옵션) |
+| `CallbackMiddleware` | 완료/실패 시 webhook 또는 함수 콜백 | ❌ (옵션) |
 
-**RetriesMiddleware** — 지수 백오프 재시도
+**RetriesMiddleware 상세:**
 ```python
 class RetriesMiddleware(Middleware):
     def __init__(
@@ -618,13 +663,48 @@ class RetriesMiddleware(Middleware):
         await broker.enqueue(task, delay=int(delay))
 ```
 
-**TimeoutMiddleware** — subprocess SIGTERM → 5초 → SIGKILL
+**CostTrackingMiddleware 상세:**
+```python
+class CostTrackingMiddleware(Middleware):
+    """stream-json 이벤트에서 토큰 사용량을 파싱하여 task.usage에 저장.
+    유저가 직접 파싱할 필요 없음 — CLI 출력 포맷은 라이브러리가 처리."""
+    
+    async def after_process(self, broker, task, *, result=None, exception=None):
+        if result and result.usage:
+            task.usage = result.usage
+            await broker.update_task(task)
+```
 
-나머지 (RateLimit, Callback, CostTracking 등)는 유저가 필요시 직접 구현.
+**CallbackMiddleware 상세:**
+```python
+class CallbackMiddleware(Middleware):
+    def __init__(
+        self,
+        on_done: str | Callable | None = None,     # webhook URL 또는 async 함수
+        on_failure: str | Callable | None = None,
+    ): ...
+    
+    async def after_process(self, broker, task, *, result=None, exception=None):
+        if exception is None and self.on_done:
+            await self._call(self.on_done, task, result)
+        elif exception and self.on_failure:
+            await self._call(self.on_failure, task, exception)
+```
+
+**RateLimitMiddleware 상세:**
+```python
+class RateLimitMiddleware(Middleware):
+    def __init__(self, max_per_minute: int = 30): ...
+    
+    async def before_process(self, broker, task):
+        """분당 요청 수 초과 시 지연."""
+        await self._wait_if_needed()
+        return task
+```
 
 ---
 
-## 8. CLI
+## 9. CLI
 
 ```bash
 # === 워커 실행 ===
@@ -664,12 +744,13 @@ open-kknaks worker list                        # 활성 워커 목록
 
 ---
 
-## 9. 패키지 구조
+## 10. 패키지 구조
 
 ```
 open_kknaks/
-├── __init__.py              # ClaudeClient, Task, TaskStatus export
+├── __init__.py              # ClaudeClient, Task, ClaudeConfig export
 ├── client.py                # ClaudeClient (프로듀서)
+├── config.py                # ClaudeConfig (Claude Code CLI 설정)
 ├── task.py                  # Task, TaskStatus, Priority, TaskResult, TokenUsage, StreamEvent
 ├── batch.py                 # BatchRunner, BatchStatus
 ├── broker/
@@ -692,7 +773,10 @@ open_kknaks/
 │   ├── base.py              # Middleware base class
 │   ├── logging.py           # LoggingMiddleware
 │   ├── retries.py           # RetriesMiddleware
-│   └── timeout.py           # TimeoutMiddleware
+│   ├── timeout.py           # TimeoutMiddleware
+│   ├── cost.py              # CostTrackingMiddleware
+│   ├── rate_limit.py        # RateLimitMiddleware
+│   └── callback.py          # CallbackMiddleware
 ├── mcp/
 │   ├── __init__.py
 │   ├── server.py            # MCPServer
@@ -708,15 +792,15 @@ open_kknaks/
 └── py.typed
 ```
 
-**v1 대비 제거된 것:**
-- `broker/memory.py` (InMemoryBroker) → 테스트는 mock
-- `config.py` (ExecutionConfig) → Worker에서 직접 병합
-- `middleware/cost.py`, `rate_limit.py`, `callback.py`, `age_limit.py` → 유저 구현
+**v1 대비 변경:**
+- `broker/memory.py` (InMemoryBroker) → **제거** (테스트는 mock)
+- `config.py` → **ExecutionConfig 제거**, **ClaudeConfig 신규** (Claude CLI 설정 분리)
+- `middleware/age_limit.py` → **제거** (유저 구현)
 - `worker/process_manager.py` → executor.py에 통합
 
 ---
 
-## 10. 변경 요약 (v1 → v2 slim)
+## 11. 변경 요약 (v1 → v2)
 
 | 항목 | v1 PRD | v2 slim |
 |---|---|---|
@@ -728,7 +812,8 @@ open_kknaks/
 | 셧다운 | SIGTERM만 | requeue + 실행 중 대기 |
 | 헬스체크 | 없음 | heartbeat + 좀비 감지 |
 | 미들웨어 시그널 | 14개 | **6개** |
-| 기본 미들웨어 | 7개 | **3개** (Logging, Retries, Timeout) |
+| 기본 미들웨어 | 7개 | **6개** (Logging, Retries, Timeout, Cost, RateLimit, Callback) |
 | CLI | 없음 | **4개 서브커맨드** (worker/queue/dlq/task) |
 | 설정 | TOML + 환경변수 + Python | **Python + 환경변수** |
-| 추상화 | AbstractBroker, AbstractExecutor, ExecutionConfig | **AbstractBroker 유지**, ExecutionConfig/AbstractExecutor 제거 |
+| 설정 | Worker에 파라미터 직접 | **ClaudeConfig 분리** (재사용 가능) |
+| 추상화 | AbstractBroker, AbstractExecutor, ExecutionConfig | **AbstractBroker 유지**, ClaudeConfig 분리, AbstractExecutor 제거 |
