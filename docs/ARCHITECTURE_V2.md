@@ -370,6 +370,11 @@ class AbstractBroker(ABC):
     async def heartbeat(self, worker_id: str) -> None: ...
     async def queue_size(self, queue_name: str) -> int: ...
     
+    # 비용
+    async def incr_cost(self, amount: float, worker_id: str | None = None) -> None: ...
+    async def get_total_cost(self) -> float: ...
+    async def get_worker_cost(self, worker_id: str) -> float: ...
+    
     # 미들웨어 시그널
     async def emit_before(self, signal: str, *args, **kwargs) -> None: ...
     async def emit_after(self, signal: str, *args, **kwargs) -> None: ...
@@ -445,6 +450,11 @@ class RedisBroker(AbstractBroker):
 
 # 워커
 {ns}:workers                       # Hash (worker_id → JSON{queues, last_heartbeat})
+
+# 비용
+{ns}:cost:total                    # Float — 전체 누적 비용 (INCRBYFLOAT)
+{ns}:cost:worker:{worker_id}       # Float — 워커별 누적 비용
+{ns}:cost:daily:{YYYY-MM-DD}       # Float — 일별 비용 (모니터링)
 ```
 
 ### 5.2 핵심 Lua 스크립트
@@ -632,7 +642,7 @@ class Middleware:
 | `LoggingMiddleware` | 작업 시작/완료/실패 structlog 로깅 | ✅ |
 | `RetriesMiddleware` | 지수 백오프 재시도 + DLQ | ✅ |
 | `TimeoutMiddleware` | subprocess SIGTERM → 5초 → SIGKILL | ✅ |
-| `CostTrackingMiddleware` | stream-json에서 토큰/비용 파싱 → `task.usage`에 저장 | ✅ |
+| `CostMiddleware` | 비용 추적 + 한도 관리 (Task/Worker/전체 3단계) + 알림 | ✅ |
 | `RateLimitMiddleware` | 분당 최대 요청 수 제한 (API rate limit 방어) | ❌ (옵션) |
 | `CallbackMiddleware` | 완료/실패 시 webhook 또는 함수 콜백 | ❌ (옵션) |
 
@@ -663,16 +673,63 @@ class RetriesMiddleware(Middleware):
         await broker.enqueue(task, delay=int(delay))
 ```
 
-**CostTrackingMiddleware 상세:**
+**CostMiddleware 상세:**
 ```python
-class CostTrackingMiddleware(Middleware):
-    """stream-json 이벤트에서 토큰 사용량을 파싱하여 task.usage에 저장.
-    유저가 직접 파싱할 필요 없음 — CLI 출력 포맷은 라이브러리가 처리."""
+class CostMiddleware(Middleware):
+    """비용 추적 + 한도 관리.
+    
+    3단계 비용 제어:
+    1. Task 단위: task.max_budget_usd → CLI가 자체 중단 (--max-budget-usd)
+    2. Worker 단위: worker_budget_usd → 워커 누적 비용 한도
+    3. 전체 단위: global_budget_usd → namespace 전체 비용 한도 (Redis에 저장)
+    """
+    
+    def __init__(
+        self,
+        worker_budget_usd: float | None = None,    # 워커 누적 한도
+        global_budget_usd: float | None = None,     # 전체 한도
+        on_budget_alert: Callable | str | None = None,  # 한도 도달 시 콜백/webhook
+        alert_threshold: float = 0.8,               # 80%에서 경고
+    ): ...
     
     async def after_process(self, broker, task, *, result=None, exception=None):
         if result and result.usage:
+            # 1) task에 비용 기록
             task.usage = result.usage
             await broker.update_task(task)
+            
+            # 2) 워커 누적 비용 갱신
+            self._worker_spent += result.usage.cost_usd or 0
+            
+            # 3) 전체 누적 비용 갱신 (Redis INCRBYFLOAT)
+            await broker.incr_cost(result.usage.cost_usd or 0)
+            
+            # 4) 한도 체크
+            await self._check_limits(broker, task)
+    
+    async def before_process(self, broker, task):
+        """한도 초과 시 작업 거부 → nack → DLQ"""
+        if await self._is_over_budget(broker):
+            task.error = "Budget limit exceeded"
+            return None  # skip
+        return task
+    
+    async def _check_limits(self, broker, task):
+        # 경고 (threshold 도달)
+        if self.on_budget_alert:
+            if self._worker_spent >= (self.worker_budget_usd or float('inf')) * self.alert_threshold:
+                await self._alert(f"Worker budget {self.alert_threshold*100}% reached: ${self._worker_spent:.2f}")
+            
+            global_spent = await broker.get_total_cost()
+            if global_spent >= (self.global_budget_usd or float('inf')) * self.alert_threshold:
+                await self._alert(f"Global budget {self.alert_threshold*100}% reached: ${global_spent:.2f}")
+```
+
+**Redis 비용 저장:**
+```
+{ns}:cost:total           # INCRBYFLOAT — 전체 누적 비용
+{ns}:cost:worker:{id}     # INCRBYFLOAT — 워커별 누적 비용
+{ns}:cost:daily:{date}    # INCRBYFLOAT — 일별 비용 (모니터링용)
 ```
 
 **CallbackMiddleware 상세:**
@@ -774,7 +831,7 @@ open_kknaks/
 │   ├── logging.py           # LoggingMiddleware
 │   ├── retries.py           # RetriesMiddleware
 │   ├── timeout.py           # TimeoutMiddleware
-│   ├── cost.py              # CostTrackingMiddleware
+│   ├── cost.py              # CostMiddleware
 │   ├── rate_limit.py        # RateLimitMiddleware
 │   └── callback.py          # CallbackMiddleware
 ├── mcp/
