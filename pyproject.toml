@@ -29,6 +29,7 @@ dev = [
 
 [project.scripts]
 open-kknaks = "open_kknaks.cli.main:app"
+open-kknaks-mcp = "open_kknaks.mcp:run"
 
 [tool.hatch.version]
 source = "vcs"
