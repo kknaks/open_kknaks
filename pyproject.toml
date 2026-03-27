@@ -1,10 +1,10 @@
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling", "hatch-vcs"]
 build-backend = "hatchling.build"
 
 [project]
 name = "open-kknaks"
-version = "0.0.1"
+dynamic = ["version"]
 description = "PTY-based task queue library for Claude Code CLI"
 requires-python = ">=3.10"
 license = "MIT"
@@ -29,6 +29,13 @@ dev = [
 
 [project.scripts]
 open-kknaks = "open_kknaks.cli.main:app"
+
+[tool.hatch.version]
+source = "vcs"
+raw-options = { root = "." }
+
+[tool.hatch.build.hooks.vcs]
+version-file = "open_kknaks/_version.py"
 
 [tool.hatch.build.targets.sdist]
 exclude = ["examples/", "tests/", "docs/"]

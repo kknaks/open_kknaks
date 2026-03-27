@@ -1,5 +1,6 @@
 """open_kknaks — PTY-based Claude Code task queue library."""
 
+from open_kknaks._version import __version__, __version_tuple__  # noqa: F401
 from open_kknaks.batch import BatchRunner, BatchStatus
 from open_kknaks.broker.base import AbstractBroker
 from open_kknaks.broker.redis import RedisBroker
