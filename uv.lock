@@ -730,7 +730,6 @@ wheels = [
 
 [[package]]
 name = "open-kknaks"
-version = "0.0.1"
 source = { editable = "." }
 dependencies = [
     { name = "pydantic" },
@@ -770,7 +769,7 @@ requires-dist = [
     { name = "structlog", specifier = ">=24.1" },
     { name = "typer", marker = "extra == 'cli'", specifier = ">=0.12" },
 ]
-provides-extras = ["redis", "mcp", "cli", "dev"]
+provides-extras = ["cli", "dev", "mcp", "redis"]
 
 [[package]]
 name = "packaging"
