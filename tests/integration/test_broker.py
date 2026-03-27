@@ -200,6 +200,88 @@ class TestWorkerManagement:
         await broker.heartbeat("w1")
         # No assertion needed — just verifying no errors
 
+    @pytest.mark.asyncio
+    async def test_deregister_worker(self, broker: RedisBroker) -> None:
+        await broker.register_worker("w1", ["default"])
+        await broker.deregister_worker("w1")
+
+        raw = await broker.redis.hget(broker._key("workers"), "w1")
+        assert raw is None
+
+    @pytest.mark.asyncio
+    async def test_deregister_nonexistent_worker(self, broker: RedisBroker) -> None:
+        # Should not raise
+        await broker.deregister_worker("nonexistent")
+
+    @pytest.mark.asyncio
+    async def test_reap_stale_workers_no_stale(self, broker: RedisBroker) -> None:
+        await broker.register_worker("w1", ["default"])
+        reaped = await broker.reap_stale_workers(timeout=60.0)
+        assert reaped == []
+
+    @pytest.mark.asyncio
+    async def test_reap_stale_workers_requeues_active_tasks(self, broker: RedisBroker) -> None:
+        import json
+        import time
+
+        # Register a worker with old heartbeat
+        info = {
+            "queues": ["default"],
+            "last_heartbeat": time.time() - 120.0,  # 2 minutes ago
+        }
+        await broker.redis.hset(broker._key("workers"), "dead-worker", json.dumps(info))
+
+        # Simulate tasks stuck in active set
+        t1 = Task(prompt="stuck-1", queue="default")
+        t2 = Task(prompt="stuck-2", queue="default")
+        await broker.enqueue(t1)
+        await broker.enqueue(t2)
+        await broker.dequeue(["default"], timeout=0)
+        await broker.dequeue(["default"], timeout=0)
+
+        # Queue empty, 2 tasks in active
+        assert await broker.queue_size("default") == 0
+        active_key = broker._key("queue", "default.active")
+        assert await broker.redis.scard(active_key) == 2
+
+        # Reap stale workers
+        reaped = await broker.reap_stale_workers(timeout=60.0)
+        assert "dead-worker" in reaped
+
+        # Worker removed from registry
+        raw = await broker.redis.hget(broker._key("workers"), "dead-worker")
+        assert raw is None
+
+        # Tasks requeued back to main queue
+        assert await broker.queue_size("default") == 2
+
+    @pytest.mark.asyncio
+    async def test_reap_stale_workers_multi_queue(self, broker: RedisBroker) -> None:
+        import json
+        import time
+
+        # Worker subscribed to two queues
+        info = {
+            "queues": ["q1", "q2"],
+            "last_heartbeat": time.time() - 120.0,
+        }
+        await broker.redis.hset(broker._key("workers"), "dead-worker", json.dumps(info))
+
+        # Tasks stuck in each queue's active set
+        t1 = Task(prompt="q1-stuck", queue="q1")
+        t2 = Task(prompt="q2-stuck", queue="q2")
+        await broker.enqueue(t1)
+        await broker.enqueue(t2)
+        await broker.dequeue(["q1"], timeout=0)
+        await broker.dequeue(["q2"], timeout=0)
+
+        reaped = await broker.reap_stale_workers(timeout=60.0)
+        assert "dead-worker" in reaped
+
+        # Both queues should have tasks back
+        assert await broker.queue_size("q1") == 1
+        assert await broker.queue_size("q2") == 1
+
 
 class TestStreaming:
     @pytest.mark.asyncio

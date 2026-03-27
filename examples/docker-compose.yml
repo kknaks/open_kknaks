@@ -18,8 +18,11 @@ services:
       redis:
         condition: service_healthy
     env_file: .env
+    environment:
+      - PATH=/claude-tools/node/bin:/claude-tools/node_modules/.bin:/usr/local/bin:/usr/bin:/bin
     volumes:
       - ..:/project:ro
+      - ./.claude-tools:/claude-tools:ro
 
   app:
     build:

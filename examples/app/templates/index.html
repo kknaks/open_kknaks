@@ -46,6 +46,18 @@
     <button onclick="submitWait()">Submit (Wait)</button>
     <span id="taskStatus" class="task-status"></span>
 
+    <details style="margin: 12px 0;" open>
+        <summary style="cursor:pointer; font-weight:bold; margin-bottom:8px;">Scenarios</summary>
+        <div style="display:flex; flex-wrap:wrap; gap:6px;">
+            <button onclick="runScenario('basic')">01 Basic</button>
+            <button onclick="runScenario('streaming')">02 Streaming</button>
+            <button onclick="runScenario('batch')">03 Batch (x3)</button>
+            <button onclick="runScenario('priority')">04 Priority</button>
+            <button onclick="runScenario('multi_queue')">06 Multi Queue</button>
+            <button onclick="runScenario('code_review')">07 Code Review</button>
+        </div>
+    </details>
+
     <div id="output"></div>
 
     <script>
@@ -138,6 +150,107 @@
         output.textContent = result.result || result.error || 'No result';
         taskStatus.textContent = `${task_id} - ${result.status}`;
         checkHealth();
+    }
+
+    // --- Scenarios ---
+    const SCENARIOS = {
+        basic: {
+            tasks: [{prompt: 'Explain what a Python decorator is in 3 sentences.'}],
+        },
+        streaming: {
+            tasks: [{prompt: 'Write a simple TODO API in FastAPI with 3 endpoints.'}],
+        },
+        batch: {
+            tasks: [
+                {prompt: "Explain Python's GIL in 2 sentences."},
+                {prompt: 'Explain asyncio event loop in 2 sentences.'},
+                {prompt: 'Compare multiprocessing vs threading in Python in 2 sentences.'},
+            ],
+        },
+        priority: {
+            tasks: [
+                {prompt: 'What is 2+2? Answer in one word.', queue: 'default', label: 'HIGH'},
+                {prompt: 'What is 3+3? Answer in one word.', queue: 'default', label: 'NORMAL'},
+                {prompt: 'What is 4+4? Answer in one word.', queue: 'default', label: 'LOW'},
+            ],
+        },
+        multi_queue: {
+            tasks: [
+                {prompt: 'Analyze this error log', context: 'TypeError: cannot unpack non-iterable NoneType object', queue: 'analysis', label: 'analysis'},
+                {prompt: 'Review this code', context: 'def foo(x): return x+1', queue: 'review', label: 'review'},
+            ],
+        },
+        code_review: {
+            tasks: [{prompt: 'open_kknaks/ 디렉토리의 구조를 분석하고, 각 레이어(L0~L5)별로 핵심 파일과 역할을 한 줄씩 요약해줘. 코드를 직접 읽어서 답해줘.'}],
+        },
+    };
+
+    async function runScenario(name) {
+        const scenario = SCENARIOS[name];
+        if (!scenario) return;
+        output.textContent = '';
+
+        const tasks = scenario.tasks;
+        if (tasks.length === 1) {
+            // Single task — stream it
+            document.getElementById('prompt').value = tasks[0].prompt;
+            taskStatus.textContent = 'submitting...';
+            const res = await fetch('/submit', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(tasks[0]),
+            });
+            const {task_id} = await res.json();
+            taskStatus.textContent = `${task_id} - streaming...`;
+            const evtSource = new EventSource(`/stream/${task_id}`);
+            evtSource.addEventListener('text', e => {
+                output.textContent += e.data;
+                output.scrollTop = output.scrollHeight;
+            });
+            evtSource.addEventListener('done', () => {
+                taskStatus.textContent = `${task_id} - done`;
+                evtSource.close();
+                checkHealth();
+            });
+            evtSource.onerror = () => { evtSource.close(); };
+        } else {
+            // Multi task — submit all, stream each in sections
+            document.getElementById('prompt').value = `[${name}] ${tasks.length} tasks`;
+            const ids = [];
+            for (const t of tasks) {
+                const res = await fetch('/submit', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify(t),
+                });
+                const {task_id} = await res.json();
+                ids.push({id: task_id, label: t.label || t.queue || 'default'});
+            }
+            taskStatus.textContent = ids.map(x => x.id.slice(0,8)).join(', ') + ' - streaming...';
+
+            let doneCount = 0;
+            for (const {id, label} of ids) {
+                output.textContent += `\n━━━ [${label}] ${id.slice(0,8)} ━━━\n`;
+                const marker = output.textContent.length;
+                const evtSource = new EventSource(`/stream/${id}`);
+                await new Promise(resolve => {
+                    evtSource.addEventListener('text', e => {
+                        output.textContent += e.data;
+                        output.scrollTop = output.scrollHeight;
+                    });
+                    evtSource.addEventListener('done', () => {
+                        output.textContent += '\n';
+                        doneCount++;
+                        taskStatus.textContent = `${doneCount}/${ids.length} done`;
+                        evtSource.close();
+                        resolve();
+                    });
+                    evtSource.onerror = () => { evtSource.close(); resolve(); };
+                });
+            }
+            taskStatus.textContent = `${ids.length}/${ids.length} done`;
+            checkHealth();
+        }
     }
     </script>
 </body>

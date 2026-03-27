@@ -45,6 +45,9 @@ class ClaudeWorker:
         self.shutdown_timeout = shutdown_timeout
         self.worker_id = f"worker-{uuid.uuid4().hex[:8]}"
 
+        self.stale_timeout = 60.0
+        self.maintenance_interval = 30.0
+
         self._executor = ClaudeCodeExecutor(
             claude_bin=self.config.claude_bin or "claude",
         )
@@ -79,6 +82,14 @@ class ClaudeWorker:
         self._claude_status = self._check_claude_status()
         logger.info("claude.check", **self._claude_status)
 
+        # Reap stale workers from previous runs (Redis 찌꺼기 정리)
+        try:
+            reaped = await self.broker.reap_stale_workers(timeout=self.stale_timeout)
+            if reaped:
+                logger.info("worker.startup_cleanup", reaped_workers=len(reaped), worker_ids=reaped)
+        except Exception:
+            logger.error("worker.startup_cleanup_failed", exc_info=True)
+
         # Register worker with claude status
         await self.broker.register_worker(self.worker_id, self.queues, self._claude_status)
 
@@ -99,6 +110,7 @@ class ClaudeWorker:
         # Start loops
         self._dequeue_task = asyncio.create_task(self._dequeue_loop())
         self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
+        self._maintenance_task = asyncio.create_task(self._maintenance_loop())
 
     async def stop(self) -> None:
         """Gracefully stop the worker."""
@@ -108,9 +120,10 @@ class ClaudeWorker:
         self._running = False
         logger.info("worker.stopping", worker_id=self.worker_id)
 
-        # Cancel dequeue and heartbeat loops
+        # Cancel dequeue, heartbeat, and maintenance loops
         self._dequeue_task.cancel()
         self._heartbeat_task.cancel()
+        self._maintenance_task.cancel()
 
         # Wait for in-flight tasks
         if self._tasks:
@@ -149,6 +162,12 @@ class ClaudeWorker:
                     count=terminated,
                     requeued=len(active_task_ids),
                 )
+
+        # Deregister worker from broker
+        try:
+            await self.broker.deregister_worker(self.worker_id)
+        except Exception:
+            logger.error("worker.deregister_failed", exc_info=True)
 
         # Emit after_worker_shutdown
         for mw in self.middleware:
@@ -222,6 +241,28 @@ class ClaudeWorker:
             except Exception:
                 logger.error("heartbeat.error", exc_info=True)
                 await asyncio.sleep(5.0)
+
+    async def _maintenance_loop(self) -> None:
+        """Periodically reap stale workers and promote delayed tasks."""
+        while self._running:
+            try:
+                # Reap workers with stale heartbeats
+                reaped = await self.broker.reap_stale_workers(timeout=self.stale_timeout)
+                if reaped:
+                    logger.info("maintenance.reaped_workers", count=len(reaped), worker_ids=reaped)
+
+                # Promote delayed tasks
+                for queue_name in self.queues:
+                    promoted = await self.broker.promote_delayed(queue_name)
+                    if promoted:
+                        logger.info("maintenance.promoted_delayed", queue=queue_name, count=promoted)
+
+                await asyncio.sleep(self.maintenance_interval)
+            except asyncio.CancelledError:
+                return
+            except Exception:
+                logger.error("maintenance.error", exc_info=True)
+                await asyncio.sleep(self.maintenance_interval)
 
     async def _process_task(self, task: Task) -> None:
         """Execute task with full middleware chain."""

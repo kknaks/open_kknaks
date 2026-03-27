@@ -85,8 +85,23 @@ class AbstractBroker(ABC):
         """Register worker and its queue subscriptions."""
 
     @abstractmethod
+    async def deregister_worker(self, worker_id: str) -> None:
+        """Remove worker from registry (called on graceful shutdown)."""
+
+    @abstractmethod
     async def heartbeat(self, worker_id: str) -> None:
         """Update worker heartbeat timestamp."""
+
+    @abstractmethod
+    async def reap_stale_workers(self, timeout: float = 60.0) -> list[str]:
+        """Find workers whose heartbeat is older than timeout seconds.
+
+        For each stale worker:
+        1. Requeue any tasks in its active sets
+        2. Remove from worker registry
+
+        Returns list of reaped worker IDs.
+        """
 
     @abstractmethod
     async def queue_size(self, queue_name: str) -> int:

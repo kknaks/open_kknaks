@@ -59,7 +59,7 @@ class RedisBroker(AbstractBroker):
             self._redis = aioredis.from_url(self._url)
 
         # Register Lua scripts
-        for name in ("enqueue", "dequeue", "ack", "nack", "requeue", "maintenance"):
+        for name in ("enqueue", "dequeue", "ack", "nack", "requeue", "maintenance", "reap_stale"):
             script_src = _load_lua(name)
             self._scripts[name] = self._redis.register_script(script_src)
 
@@ -246,12 +246,54 @@ class RedisBroker(AbstractBroker):
             info.update(extra)
         await self.redis.hset(self._key("workers"), worker_id, json.dumps(info))
 
+    async def deregister_worker(self, worker_id: str) -> None:
+        await self.redis.hdel(self._key("workers"), worker_id)
+
     async def heartbeat(self, worker_id: str) -> None:
         raw = await self.redis.hget(self._key("workers"), worker_id)
         if raw:
             info = json.loads(raw.decode() if isinstance(raw, bytes) else str(raw))
             info["last_heartbeat"] = time.time()
             await self.redis.hset(self._key("workers"), worker_id, json.dumps(info))
+
+    async def reap_stale_workers(self, timeout: float = 60.0) -> list[str]:
+        workers_key = self._key("workers")
+        all_workers = await self.redis.hgetall(workers_key)
+        now = time.time()
+        reaped: list[str] = []
+
+        for raw_id, raw_info in all_workers.items():
+            worker_id = raw_id.decode() if isinstance(raw_id, bytes) else str(raw_id)
+            info = json.loads(raw_info.decode() if isinstance(raw_info, bytes) else str(raw_info))
+            last_hb = info.get("last_heartbeat", 0.0)
+
+            if now - last_hb < timeout:
+                continue
+
+            # Stale worker — requeue its active tasks for each queue
+            queues = info.get("queues", [])
+            total_requeued = 0
+            for queue_name in queues:
+                count = await self._scripts["reap_stale"](
+                    keys=[
+                        self._key("queue", f"{queue_name}.active"),
+                        self._key("queue", queue_name),
+                    ],
+                    args=[self._score(Priority.NORMAL)],
+                )
+                total_requeued += int(count)
+
+            # Remove worker from registry
+            await self.redis.hdel(workers_key, worker_id)
+            reaped.append(worker_id)
+            logger.warning(
+                "worker.reaped",
+                worker_id=worker_id,
+                stale_seconds=round(now - last_hb, 1),
+                requeued=total_requeued,
+            )
+
+        return reaped
 
     async def queue_size(self, queue_name: str) -> int:
         result: int = await self.redis.zcard(self._key("queue", queue_name))

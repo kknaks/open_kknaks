@@ -69,139 +69,103 @@ services:
 
   worker:
     build:
-      context: .
-      dockerfile: Dockerfile.worker
+      context: ..
+      dockerfile: examples/Dockerfile.worker
     depends_on:
       redis:
         condition: service_healthy
+    env_file: .env
     environment:
-      - REDIS_URL=redis://redis:6379
-      - NAMESPACE=example
-      - QUEUES=default,analysis,review
-      - CONCURRENCY=2
-      - PATH=/host-node/bin:/usr/local/bin:/usr/bin:/bin
+      - PATH=/claude-tools/node/bin:/claude-tools/node_modules/.bin:/usr/local/bin:/usr/bin:/bin
     volumes:
-      - ${HOME}/.claude:/root/.claude:ro       # OAuth 크리덴셜
-      - ${CLAUDE_DIR}:/host-node:ro            # Node.js prefix (bin/ + lib/node_modules)
-      - ./workspace:/workspace
-    working_dir: /workspace
+      - ..:/project:ro
+      - ./.claude-tools:/claude-tools:ro
 
   app:
     build:
-      context: .
-      dockerfile: Dockerfile.app
+      context: ..
+      dockerfile: examples/Dockerfile.app
     depends_on:
       redis:
         condition: service_healthy
+    env_file: .env
     ports:
       - "8000:8000"
-    environment:
-      - REDIS_URL=redis://redis:6379
-      - NAMESPACE=example
 
 volumes:
   redis_data:
 ```
 
+**핵심 포인트:**
+- Docker 이미지에 Node.js/Claude CLI 없음 → Python only 경량 이미지
+- `.claude-tools/` 디렉토리를 `/claude-tools`로 마운트
+- `PATH`에 마운트된 node 바이너리 + claude CLI 경로 추가
+- macOS/Linux 호스트 둘 다 지원 (setup.sh가 Linux용 node 다운로드)
+
 ---
 
-## 4. setup.sh — Claude CLI 경로 자동 탐색
+## 4. setup.sh — Linux Node + Claude CLI 설치
 
 ```bash
 #!/bin/bash
 set -e
 
-# Claude CLI 바이너리 찾기
-CLAUDE_BIN=$(which claude 2>/dev/null)
-if [ -z "$CLAUDE_BIN" ]; then
-    echo "ERROR: claude CLI를 찾을 수 없습니다."
-    echo "  설치: https://claude.ai/download"
-    echo "  설치 후: claude login"
-    exit 1
-fi
+# 1. Claude OAuth 토큰 입력
+read -rp "Token: " TOKEN
 
-# Node.js prefix 찾기 (bin/ + lib/node_modules 포함하는 상위 디렉토리)
-#
-# claude 바이너리 구조:
-#   bin/claude → ../lib/node_modules/@anthropic-ai/claude-code/cli.js (심볼릭 링크)
-#   bin/node   (Node.js 런타임)
-#   lib/node_modules/@anthropic-ai/claude-code/ (72MB 패키지)
-#
-# bin/만 마운트하면 심볼릭 링크가 깨지므로,
-# bin/ + lib/을 포함하는 prefix 디렉토리 전체를 마운트해야 한다.
-CLAUDE_DIR=$(dirname "$(dirname "$(realpath "$CLAUDE_BIN")")")
+# 2. Linux용 Node.js 바이너리 다운로드 → .claude-tools/node/
+#    호스트가 macOS/Linux 무관 — 컨테이너(Linux)에서 실행할 바이너리
+ARCH=$(uname -m)   # arm64 → arm64, x86_64 → x64
+curl -fSL "https://nodejs.org/dist/v22.16.0/node-v22.16.0-linux-${NODE_ARCH}.tar.xz" \
+    | tar -xJ --strip-components=1 -C .claude-tools/node/
 
-# 로그인 상태 확인
-if ! claude auth status &>/dev/null; then
-    echo "WARNING: Claude Code 로그인이 필요합니다."
-    echo "  실행: claude login"
-fi
+# 3. Claude Code CLI 설치 (호스트 npm 사용 — JS는 플랫폼 무관)
+npm install --prefix .claude-tools @anthropic-ai/claude-code
 
-# .env 생성
-cat > .env << EOF
-REDIS_URL=redis://redis:6379
-NAMESPACE=example
-QUEUES=default,analysis,review
-CONCURRENCY=2
-CLAUDE_DIR=${CLAUDE_DIR}
-EOF
-
-echo "=== setup 완료 ==="
-echo "Claude CLI: ${CLAUDE_BIN}"
-echo "마운트 경로: ${CLAUDE_DIR} → /host-claude"
-echo ""
-echo "실행: docker compose up -d"
+# 4. .env 생성
+# 5. docker compose up -d --build
 ```
 
-**동작 예시:**
-
-```bash
-$ ./setup.sh
-
-# nvm 유저
-# Claude CLI: /Users/kknaks/.nvm/versions/node/v20.20.0/bin/claude
-# Node prefix: /Users/kknaks/.nvm/versions/node/v20.20.0
-# → /host-node/bin/claude, /host-node/bin/node, /host-node/lib/node_modules/...
-
-# homebrew 유저
-# Claude CLI: /opt/homebrew/bin/claude
-# Node prefix: /opt/homebrew
-# → /host-node/bin/claude, /host-node/bin/node, /host-node/lib/node_modules/...
-
-# 시스템 npm 유저
-# Claude CLI: /usr/local/bin/claude
-# Node prefix: /usr/local
-# → /host-node/bin/claude, /host-node/bin/node, /host-node/lib/node_modules/...
+**구조:**
+```
+.claude-tools/           ← setup.sh가 생성, .gitignore에 포함
+├── node/                ← Linux Node.js 바이너리 (컨테이너용)
+│   └── bin/node
+├── node_modules/        ← Claude Code CLI (JS)
+│   ├── .bin/claude      ← entry point
+│   └── @anthropic-ai/claude-code/
+└── package.json
 ```
 
-어떤 방식으로 설치했든 `setup.sh`가 Node.js prefix를 찾아서 `.env`에 넣고,
-docker-compose가 prefix 전체를 `/host-node`로 바인드 마운트합니다.
-컨테이너 안에서 `claude` 실행 시 `/host-node/bin/node`가 런타임으로 사용됩니다.
+**핵심:**
+- Docker 이미지에 Node/Claude 없음 → 마운트로 주입
+- 호스트 npm으로 설치하되, node 바이너리는 Linux용 별도 다운로드
+- `#!/usr/bin/env node` shebang → PATH에 Linux node가 있으면 동작
 
 ---
 
 ## 5. Dockerfile
 
-### Dockerfile.worker
+### Dockerfile.worker (Python only — Node/Claude 없음)
 
 ```dockerfile
 FROM python:3.12-slim
 
-# Claude Code CLI는 호스트에서 바인드 마운트 (/host-claude)
-# Node.js, claude 바이너리 설치 불필요 → 이미지 가벼움
-
-# 라이브러리 설치 (로컬 소스)
+# 라이브러리 설치
 WORKDIR /lib
-COPY ../../open_kknaks ./open_kknaks
-COPY ../../pyproject.toml .
-RUN pip install -e ".[redis]"
+COPY open_kknaks ./open_kknaks
+COPY pyproject.toml .
+RUN pip install --no-cache-dir ".[redis]"
 
 # 워커 코드
 WORKDIR /app
-COPY worker/ .
+COPY examples/worker/ .
 
-CMD ["python", "run.py"]
+CMD ["python3", "run.py"]
 ```
+
+> Node.js와 Claude CLI는 `.claude-tools/` 마운트로 주입.
+> docker-compose.yml의 `PATH` 환경변수가 `/claude-tools/node/bin` + `/claude-tools/node_modules/.bin` 추가.
 
 ### Dockerfile.app
 
@@ -209,12 +173,12 @@ CMD ["python", "run.py"]
 FROM python:3.12-slim
 
 WORKDIR /lib
-COPY ../../open_kknaks ./open_kknaks
-COPY ../../pyproject.toml .
-RUN pip install -e ".[redis]" && pip install fastapi uvicorn jinja2 sse-starlette
+COPY open_kknaks ./open_kknaks
+COPY pyproject.toml .
+RUN pip install --no-cache-dir ".[redis]" fastapi uvicorn jinja2 sse-starlette
 
 WORKDIR /app
-COPY app/ .
+COPY examples/app/ .
 
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
 ```
@@ -633,13 +597,8 @@ asyncio.run(main())
 
 ### 사전 조건
 
-```bash
-# 호스트에 Claude Code CLI 설치 + 로그인 (1회만)
-claude login
-claude auth status   # 로그인 확인
-```
-
-> 이미 로컬에서 Claude Code를 쓰고 있다면 추가 작업 없음.
+- **호스트에 npm 설치** (Node.js와 함께 — setup.sh가 Claude CLI 설치에 사용)
+- **Claude Code OAuth 토큰** (`claude setup-token` 또는 Anthropic Console에서 발급)
 
 ### 한 방 실행
 
@@ -647,8 +606,7 @@ claude auth status   # 로그인 확인
 git clone https://github.com/kknaks/open_kknaks.git
 cd open_kknaks/examples
 
-./setup.sh           # Claude CLI 경로 자동 탐색 → .env 생성
-docker compose up -d
+./setup.sh           # Linux Node 다운로드 + Claude CLI 설치 + .env 생성 + docker compose up
 ```
 
 ### 접속
@@ -686,7 +644,8 @@ REDIS_URL=redis://redis:6379
 NAMESPACE=example
 QUEUES=default,analysis,review
 CONCURRENCY=2
-CLAUDE_DIR=             # setup.sh가 자동 설정
+WORK_DIR=/project
+CLAUDE_CODE_OAUTH_TOKEN=  # setup.sh가 자동 설정
 ```
 
 ---
