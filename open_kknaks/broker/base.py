@@ -124,6 +124,12 @@ class AbstractBroker(ABC):
     async def get_worker_cost(self, worker_id: str) -> float:
         """Get worker-specific cumulative cost."""
 
+    # ─── Maintenance ───
+
+    @abstractmethod
+    async def promote_delayed(self, queue_name: str) -> int:
+        """Move delayed tasks that are due to the main queue."""
+
     # ─── Lifecycle ───
 
     @abstractmethod
