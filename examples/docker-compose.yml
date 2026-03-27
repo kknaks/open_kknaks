@@ -17,16 +17,8 @@ services:
     depends_on:
       redis:
         condition: service_healthy
-    environment:
-      - REDIS_URL=redis://redis:6379
-      - NAMESPACE=example
-      - QUEUES=default,analysis,review
-      - CONCURRENCY=2
-      - WORK_DIR=/project
-      - PATH=/host-node/bin:/usr/local/bin:/usr/bin:/bin
+    env_file: .env
     volumes:
-      - ${HOME}/.claude:/root/.claude:ro
-      - ${CLAUDE_DIR}:/host-node:ro
       - ..:/project:ro
 
   app:
@@ -36,11 +28,9 @@ services:
     depends_on:
       redis:
         condition: service_healthy
+    env_file: .env
     ports:
       - "8000:8000"
-    environment:
-      - REDIS_URL=redis://redis:6379
-      - NAMESPACE=example
 
 volumes:
   redis_data:

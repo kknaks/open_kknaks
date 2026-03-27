@@ -102,4 +102,15 @@ def parse_stream_json_line(line: str) -> dict[str, Any] | None:
                 "retry_delay_ms": obj.get("retry_delay_ms", 0),
             }
 
+    # --- Partial streaming (--include-partial-messages) ---
+    elif msg_type == "stream_event":
+        event = obj.get("event", {})
+        event_type = event.get("type", "")
+        if event_type == "content_block_delta":
+            delta = event.get("delta", {})
+            if delta.get("type") == "text_delta":
+                text = delta.get("text", "")
+                if text:
+                    return {"type": "text", "content": text}
+
     return None

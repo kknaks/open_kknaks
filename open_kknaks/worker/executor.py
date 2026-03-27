@@ -82,9 +82,12 @@ class ClaudeCodeExecutor:
             if slave_fd > 2:
                 os.close(slave_fd)
 
+            # Set working directory
+            if config.work_dir:
+                os.chdir(config.work_dir)
+
             # Write context to stdin if provided
             if task.context:
-                # Context will be piped via a different mechanism
                 os.environ["CLAUDE_CONTEXT"] = task.context
 
             os.execvp(claude_bin, cmd)
@@ -133,7 +136,7 @@ class ClaudeCodeExecutor:
     def _build_command(self, task: Task, config: ClaudeConfig) -> list[str]:
         """Build Claude CLI command from task and config."""
         claude_bin = config.claude_bin or self.claude_bin
-        cmd = [claude_bin, "-p", "--output-format", "stream-json", "--verbose"]
+        cmd = [claude_bin, "-p", "--output-format", "stream-json", "--verbose", "--include-partial-messages"]
 
         if config.model:
             cmd.extend(["--model", config.model])

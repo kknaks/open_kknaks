@@ -1,31 +1,32 @@
 #!/bin/bash
 set -e
 
-# Claude CLI 바이너리 찾기
-CLAUDE_BIN=$(which claude 2>/dev/null || true)
-if [ -z "$CLAUDE_BIN" ]; then
-    echo "ERROR: claude CLI를 찾을 수 없습니다."
-    echo "  설치: https://claude.ai/download"
-    echo "  설치 후: claude login"
+echo "Claude Code OAuth 토큰을 입력하세요"
+echo "(web: https://console.anthropic.com/settings/keys)"
+echo "(terminal: claude setup-token)"
+echo ""
+read -rp "Token: " TOKEN
+
+if [ -z "$TOKEN" ]; then
+    echo "ERROR: 토큰이 비어있습니다."
     exit 1
 fi
 
-# Node.js prefix 찾기
-CLAUDE_DIR=$(cd "$(dirname "$CLAUDE_BIN")/.." && pwd)
-
-# 로그인 상태 확인
-if ! claude auth status &>/dev/null; then
-    echo "WARNING: Claude Code 로그인이 필요합니다."
-    echo "  실행: claude login"
-fi
-
-# .env 생성
 cat > .env << EOF
-CLAUDE_DIR=${CLAUDE_DIR}
+REDIS_URL=redis://redis:6379
+NAMESPACE=example
+QUEUES=default,analysis,review
+CONCURRENCY=2
+WORK_DIR=/project
+CLAUDE_CODE_OAUTH_TOKEN=${TOKEN}
 EOF
 
-echo "=== setup 완료 ==="
-echo "Claude CLI: ${CLAUDE_BIN}"
-echo "마운트 경로: ${CLAUDE_DIR} → /host-node"
 echo ""
-echo "실행: docker compose up -d"
+echo "=== .env 생성 완료 ==="
+echo ""
+echo "Docker Compose 빌드 + 실행 중..."
+docker compose up -d --build
+
+echo ""
+echo "=== 완료 ==="
+echo "http://localhost:8000"
