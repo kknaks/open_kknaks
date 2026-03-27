@@ -1,48 +1,47 @@
 """MCP server for open_kknaks task queue."""
 
-import json
+# import json
 
 from mcp.server import Server
 from mcp.types import TextContent, Tool
 
-from open_kknaks.batch import BatchRunner
-from open_kknaks.broker.base import AbstractBroker
-from open_kknaks.client import ClaudeClient
+# from open_kknaks.batch import BatchRunner
+# from open_kknaks.broker.base import AbstractBroker
+# from open_kknaks.client import ClaudeClient
 
 
-def _task_to_json(task: "open_kknaks.task.Task") -> str:  # type: ignore[name-defined]  # noqa: F821
-    """Serialize a Task to a JSON string with all relevant fields."""
-    data: dict[str, object] = {
-        "id": task.id,
-        "prompt": task.prompt,
-        "queue": task.queue,
-        "status": task.status,
-        "priority": task.priority,
-        "result": task.result,
-        "error": task.error,
-        "exit_code": task.exit_code,
-        "retry_count": task.retry_count,
-        "max_retries": task.max_retries,
-        "created_at": task.created_at.isoformat(),
-    }
-    if task.context:
-        data["context"] = task.context
-    if task.model:
-        data["model"] = task.model
-    if task.batch_id:
-        data["batch_id"] = task.batch_id
-    if task.metadata:
-        data["metadata"] = task.metadata
-    if task.result_session_id:
-        data["session_id"] = task.result_session_id
-    if task.started_at:
-        data["started_at"] = task.started_at.isoformat()
-    if task.finished_at:
-        data["finished_at"] = task.finished_at.isoformat()
-    if task.usage:
-        data["usage"] = task.usage.model_dump()
-    return json.dumps(data, ensure_ascii=False)
-
+# def _task_to_json(task: "open_kknaks.task.Task") -> str:
+#     """Serialize a Task to a JSON string with all relevant fields."""
+#     data: dict[str, object] = {
+#         "id": task.id,
+#         "prompt": task.prompt,
+#         "queue": task.queue,
+#         "status": task.status,
+#         "priority": task.priority,
+#         "result": task.result,
+#         "error": task.error,
+#         "exit_code": task.exit_code,
+#         "retry_count": task.retry_count,
+#         "max_retries": task.max_retries,
+#         "created_at": task.created_at.isoformat(),
+#     }
+#     if task.context:
+#         data["context"] = task.context
+#     if task.model:
+#         data["model"] = task.model
+#     if task.batch_id:
+#         data["batch_id"] = task.batch_id
+#     if task.metadata:
+#         data["metadata"] = task.metadata
+#     if task.result_session_id:
+#         data["session_id"] = task.result_session_id
+#     if task.started_at:
+#         data["started_at"] = task.started_at.isoformat()
+#     if task.finished_at:
+#         data["finished_at"] = task.finished_at.isoformat()
+#     if task.usage:
+#         data["usage"] = task.usage.model_dump()
+#     return json.dumps(data, ensure_ascii=False)
 
 # ─── Tool definitions ───
 
@@ -579,8 +578,8 @@ def _get_cost_tool() -> Tool:
     )
 
 
-def create_server(broker: AbstractBroker) -> Server:
-    """Create an MCP server with open_kknaks tools."""
+def create_server() -> Server:
+    """Create an MCP server with open_kknaks tools (schema-only mode)."""
     server = Server("open_kknaks")
 
     @server.list_tools()  # type: ignore[no-untyped-call,untyped-decorator]
@@ -603,172 +602,142 @@ def create_server(broker: AbstractBroker) -> Server:
 
     @server.call_tool()  # type: ignore[untyped-decorator]
     async def call_tool(name: str, arguments: dict[str, object]) -> list[TextContent]:
-        client = ClaudeClient(broker=broker)
-
-        # ─── Task: submit ───
-
-        if name == "submit_task":
-            task_id = await client.submit(
-                prompt=str(arguments["prompt"]),
-                context=str(arguments["context"]) if arguments.get("context") else None,
-                queue=str(arguments.get("queue", "default")),
-                priority=int(str(arguments["priority"])) if arguments.get("priority") else 5,
-                delay_seconds=int(str(arguments["delay_seconds"])) if arguments.get("delay_seconds") else None,
-                timeout=int(str(arguments["timeout"])) if arguments.get("timeout") else None,
-                max_retries=int(str(arguments["max_retries"])) if arguments.get("max_retries") else 0,
-                model=str(arguments["model"]) if arguments.get("model") else None,
-                system_prompt=str(arguments["system_prompt"]) if arguments.get("system_prompt") else None,
-                append_system_prompt=(
-                    str(arguments["append_system_prompt"]) if arguments.get("append_system_prompt") else None
-                ),
-                max_turns=int(str(arguments["max_turns"])) if arguments.get("max_turns") else None,
-                effort=str(arguments["effort"]) if arguments.get("effort") else None,
-                json_schema=str(arguments["json_schema"]) if arguments.get("json_schema") else None,
-                allowed_tools=(
-                    [str(t) for t in arguments["allowed_tools"]]  # type: ignore[attr-defined]
-                    if arguments.get("allowed_tools")
-                    else None
-                ),
-                disallowed_tools=(
-                    [str(t) for t in arguments["disallowed_tools"]]  # type: ignore[attr-defined]
-                    if arguments.get("disallowed_tools")
-                    else None
-                ),
-                permission_mode=str(arguments["permission_mode"]) if arguments.get("permission_mode") else None,
-                session_id=str(arguments["session_id"]) if arguments.get("session_id") else None,
-                mcp_config=str(arguments["mcp_config"]) if arguments.get("mcp_config") else None,
-                add_dirs=(
-                    [str(d) for d in arguments["add_dirs"]]  # type: ignore[attr-defined]
-                    if arguments.get("add_dirs")
-                    else None
-                ),
-                metadata=(
-                    {str(k): v for k, v in arguments["metadata"].items()}  # type: ignore[attr-defined]
-                    if arguments.get("metadata")
-                    else None
-                ),
+        return [
+            TextContent(
+                type="text",
+                text=(f"Tool '{name}' is schema-only. To execute, use ClaudeClient (Python API) or open-kknaks CLI."),
             )
-            return [TextContent(type="text", text=f"Task submitted: {task_id}")]
+        ]
 
-        # ─── Task: get full details ───
-
-        if name == "get_task":
-            task = await broker.get_task(str(arguments["task_id"]))
-            if task is None:
-                return [TextContent(type="text", text="Task not found")]
-            return [TextContent(type="text", text=_task_to_json(task))]
-
-        # ─── Task: status ───
-
-        if name == "get_status":
-            status = await client.status(str(arguments["task_id"]))
-            return [TextContent(type="text", text=f"Status: {status or 'not found'}")]
-
-        # ─── Task: result (blocking wait) ───
-
-        if name == "get_result":
-            timeout = float(str(arguments.get("timeout", 600)))
-            task = await client.result(str(arguments["task_id"]), timeout=timeout)
-            if task is None:
-                return [TextContent(type="text", text="Task not found")]
-            return [TextContent(type="text", text=_task_to_json(task))]
-
-        # ─── Task: cancel ───
-
-        if name == "cancel_task":
-            success = await client.cancel(str(arguments["task_id"]))
-            text = "Cancelled" if success else "Task not found"
-            return [TextContent(type="text", text=text)]
-
-        # ─── Batch: submit ───
-
-        if name == "submit_batch":
-            batch = BatchRunner(broker=broker)
-            prompts_raw = arguments["prompts"]
-            prompts: list[dict[str, str]] = []
-            for p in prompts_raw:  # type: ignore[attr-defined]
-                item: dict[str, str] = {"prompt": str(p["prompt"])}
-                ctx = p.get("context")
-                if ctx:
-                    item["context"] = str(ctx)
-                prompts.append(item)
-            queue = str(arguments.get("queue", "default"))
-            batch_id, task_ids = await batch.submit_batch(prompts, queue=queue)
-            return [
-                TextContent(
-                    type="text",
-                    text=json.dumps({"batch_id": batch_id, "task_ids": task_ids}),
-                )
-            ]
-
-        # ─── Batch: status ───
-
-        if name == "get_batch_status":
-            batch = BatchRunner(broker=broker)
-            task_ids = [str(t) for t in arguments["task_ids"]]  # type: ignore[attr-defined]
-            status = await batch.get_batch_status(str(arguments["batch_id"]), task_ids)
-            return [TextContent(type="text", text=f"Batch status: {status}")]
-
-        # ─── Batch: wait ───
-
-        if name == "wait_batch":
-            batch = BatchRunner(broker=broker)
-            task_ids = [str(t) for t in arguments["task_ids"]]  # type: ignore[attr-defined]
-            timeout = float(str(arguments.get("timeout", 3600)))
-            tasks = await batch.wait_batch(task_ids, timeout=timeout)
-            results = [json.loads(_task_to_json(t)) for t in tasks]
-            return [TextContent(type="text", text=json.dumps(results, ensure_ascii=False))]
-
-        # ─── Queue: size ───
-
-        if name == "queue_size":
-            count = await broker.queue_size(str(arguments["queue_name"]))
-            return [TextContent(type="text", text=json.dumps({"queue": str(arguments["queue_name"]), "size": count}))]
-
-        # ─── DLQ: list ───
-
-        if name == "list_dlq":
-            limit = int(str(arguments.get("limit", 100)))
-            tasks = await broker.list_dlq(str(arguments["queue_name"]), limit=limit)
-            dlq_items = []
-            for t in tasks:
-                dlq_items.append(
-                    {
-                        "id": t.id,
-                        "status": t.status,
-                        "prompt": t.prompt[:200],
-                        "error": t.error,
-                        "retry_count": t.retry_count,
-                        "created_at": t.created_at.isoformat(),
-                    }
-                )
-            return [TextContent(type="text", text=json.dumps(dlq_items, ensure_ascii=False))]
-
-        # ─── DLQ: retry ───
-
-        if name == "retry_from_dlq":
-            await broker.retry_from_dlq(str(arguments["queue_name"]), str(arguments["task_id"]))
-            return [TextContent(type="text", text="Retried")]
-
-        # ─── DLQ: purge ───
-
-        if name == "purge_dlq":
-            tasks_before = await broker.list_dlq(str(arguments["queue_name"]), limit=100000)
-            count = len(tasks_before)
-            await broker.purge_dlq(str(arguments["queue_name"]))
-            return [TextContent(type="text", text=f"Purged {count} tasks from DLQ")]
-
-        # ─── Cost ───
-
-        if name == "get_cost":
-            total = await broker.get_total_cost()
-            result: dict[str, object] = {"total_cost_usd": total}
-            if arguments.get("worker_id"):
-                worker_cost = await broker.get_worker_cost(str(arguments["worker_id"]))
-                result["worker_id"] = str(arguments["worker_id"])
-                result["worker_cost_usd"] = worker_cost
-            return [TextContent(type="text", text=json.dumps(result))]
-
-        return [TextContent(type="text", text=f"Unknown tool: {name}")]
+    # ─── Execution handlers (disabled — uncomment to enable with broker) ───
+    #
+    # def create_server(broker: AbstractBroker) -> Server:
+    #     ...
+    #
+    # @server.call_tool()
+    # async def call_tool(name, arguments):
+    #     client = ClaudeClient(broker=broker)
+    #
+    #     if name == "submit_task":
+    #         task_id = await client.submit(
+    #             prompt=str(arguments["prompt"]),
+    #             context=str(arguments["context"]) if arguments.get("context") else None,
+    #             queue=str(arguments.get("queue", "default")),
+    #             priority=int(str(arguments["priority"])) if arguments.get("priority") else 5,
+    #             delay_seconds=int(str(arguments["delay_seconds"])) if arguments.get("delay_seconds") else None,  # noqa: E501
+    #             timeout=int(str(arguments["timeout"])) if arguments.get("timeout") else None,
+    #             max_retries=int(str(arguments["max_retries"])) if arguments.get("max_retries") else 0,
+    #             model=str(arguments["model"]) if arguments.get("model") else None,
+    #             system_prompt=str(arguments["system_prompt"]) if arguments.get("system_prompt") else None,  # noqa: E501
+    #             append_system_prompt=(
+    #                 str(arguments["append_system_prompt"]) if arguments.get("append_system_prompt") else None  # noqa: E501
+    #             ),
+    #             max_turns=int(str(arguments["max_turns"])) if arguments.get("max_turns") else None,
+    #             effort=str(arguments["effort"]) if arguments.get("effort") else None,
+    #             json_schema=str(arguments["json_schema"]) if arguments.get("json_schema") else None,
+    #             allowed_tools=(
+    #                 [str(t) for t in arguments["allowed_tools"]]
+    #                 if arguments.get("allowed_tools") else None
+    #             ),
+    #             disallowed_tools=(
+    #                 [str(t) for t in arguments["disallowed_tools"]]
+    #                 if arguments.get("disallowed_tools") else None
+    #             ),
+    #             permission_mode=str(arguments["permission_mode"]) if arguments.get("permission_mode") else None,  # noqa: E501
+    #             session_id=str(arguments["session_id"]) if arguments.get("session_id") else None,
+    #             mcp_config=str(arguments["mcp_config"]) if arguments.get("mcp_config") else None,
+    #             add_dirs=(
+    #                 [str(d) for d in arguments["add_dirs"]]
+    #                 if arguments.get("add_dirs") else None
+    #             ),
+    #             metadata=(
+    #                 {str(k): v for k, v in arguments["metadata"].items()}
+    #                 if arguments.get("metadata") else None
+    #             ),
+    #         )
+    #         return [TextContent(type="text", text=f"Task submitted: {task_id}")]
+    #
+    #     if name == "get_task":
+    #         task = await broker.get_task(str(arguments["task_id"]))
+    #         if task is None:
+    #             return [TextContent(type="text", text="Task not found")]
+    #         return [TextContent(type="text", text=_task_to_json(task))]
+    #
+    #     if name == "get_status":
+    #         status = await client.status(str(arguments["task_id"]))
+    #         return [TextContent(type="text", text=f"Status: {status or 'not found'}")]
+    #
+    #     if name == "get_result":
+    #         timeout = float(str(arguments.get("timeout", 600)))
+    #         task = await client.result(str(arguments["task_id"]), timeout=timeout)
+    #         if task is None:
+    #             return [TextContent(type="text", text="Task not found")]
+    #         return [TextContent(type="text", text=_task_to_json(task))]
+    #
+    #     if name == "cancel_task":
+    #         success = await client.cancel(str(arguments["task_id"]))
+    #         text = "Cancelled" if success else "Task not found"
+    #         return [TextContent(type="text", text=text)]
+    #
+    #     if name == "submit_batch":
+    #         batch = BatchRunner(broker=broker)
+    #         prompts_raw = arguments["prompts"]
+    #         prompts: list[dict[str, str]] = []
+    #         for p in prompts_raw:
+    #             item: dict[str, str] = {"prompt": str(p["prompt"])}
+    #             ctx = p.get("context")
+    #             if ctx:
+    #                 item["context"] = str(ctx)
+    #             prompts.append(item)
+    #         queue = str(arguments.get("queue", "default"))
+    #         batch_id, task_ids = await batch.submit_batch(prompts, queue=queue)
+    #         return [TextContent(type="text", text=json.dumps({"batch_id": batch_id, "task_ids": task_ids}))]  # noqa: E501
+    #
+    #     if name == "get_batch_status":
+    #         batch = BatchRunner(broker=broker)
+    #         task_ids = [str(t) for t in arguments["task_ids"]]
+    #         status = await batch.get_batch_status(str(arguments["batch_id"]), task_ids)
+    #         return [TextContent(type="text", text=f"Batch status: {status}")]
+    #
+    #     if name == "wait_batch":
+    #         batch = BatchRunner(broker=broker)
+    #         task_ids = [str(t) for t in arguments["task_ids"]]
+    #         timeout = float(str(arguments.get("timeout", 3600)))
+    #         tasks = await batch.wait_batch(task_ids, timeout=timeout)
+    #         results = [json.loads(_task_to_json(t)) for t in tasks]
+    #         return [TextContent(type="text", text=json.dumps(results, ensure_ascii=False))]
+    #
+    #     if name == "queue_size":
+    #         count = await broker.queue_size(str(arguments["queue_name"]))
+    #         return [TextContent(type="text", text=json.dumps({"queue": str(arguments["queue_name"]), "size": count}))]  # noqa: E501
+    #
+    #     if name == "list_dlq":
+    #         limit = int(str(arguments.get("limit", 100)))
+    #         tasks = await broker.list_dlq(str(arguments["queue_name"]), limit=limit)
+    #         dlq_items = [{"id": t.id, "status": t.status, "prompt": t.prompt[:200],
+    #                       "error": t.error, "retry_count": t.retry_count,
+    #                       "created_at": t.created_at.isoformat()} for t in tasks]
+    #         return [TextContent(type="text", text=json.dumps(dlq_items, ensure_ascii=False))]
+    #
+    #     if name == "retry_from_dlq":
+    #         await broker.retry_from_dlq(str(arguments["queue_name"]), str(arguments["task_id"]))
+    #         return [TextContent(type="text", text="Retried")]
+    #
+    #     if name == "purge_dlq":
+    #         tasks_before = await broker.list_dlq(str(arguments["queue_name"]), limit=100000)
+    #         count = len(tasks_before)
+    #         await broker.purge_dlq(str(arguments["queue_name"]))
+    #         return [TextContent(type="text", text=f"Purged {count} tasks from DLQ")]
+    #
+    #     if name == "get_cost":
+    #         total = await broker.get_total_cost()
+    #         result: dict[str, object] = {"total_cost_usd": total}
+    #         if arguments.get("worker_id"):
+    #             worker_cost = await broker.get_worker_cost(str(arguments["worker_id"]))
+    #             result["worker_id"] = str(arguments["worker_id"])
+    #             result["worker_cost_usd"] = worker_cost
+    #         return [TextContent(type="text", text=json.dumps(result))]
+    #
+    #     return [TextContent(type="text", text=f"Unknown tool: {name}")]
 
     return server
