@@ -73,24 +73,37 @@ class ClaudeCodeExecutor:
         pid = os.fork()
 
         if pid == 0:
-            # Child process
-            os.close(master_fd)
-            os.setsid()
-            os.dup2(slave_fd, 0)
-            os.dup2(slave_fd, 1)
-            os.dup2(slave_fd, 2)
-            if slave_fd > 2:
-                os.close(slave_fd)
+            # Child process — all errors must be caught and written to PTY
+            try:
+                os.close(master_fd)
+                os.setsid()
+                os.dup2(slave_fd, 0)
+                os.dup2(slave_fd, 1)
+                os.dup2(slave_fd, 2)
+                if slave_fd > 2:
+                    os.close(slave_fd)
 
-            # Set working directory
-            if config.work_dir:
-                os.chdir(config.work_dir)
+                # Set working directory
+                if config.work_dir:
+                    work_dir = os.path.expanduser(config.work_dir)
+                    if not os.path.isdir(work_dir):
+                        msg = f"open_kknaks: work_dir does not exist: {work_dir}\n"
+                        os.write(2, msg.encode())
+                        os._exit(1)
+                    os.chdir(work_dir)
 
-            # Write context to stdin if provided
-            if task.context:
-                os.environ["CLAUDE_CONTEXT"] = task.context
+                # Write context to stdin if provided
+                if task.context:
+                    os.environ["CLAUDE_CONTEXT"] = task.context
 
-            os.execvp(claude_bin, cmd)
+                os.execvp(claude_bin, cmd)
+            except Exception as exc:
+                try:
+                    msg = f"open_kknaks: child process error: {exc}\n"
+                    os.write(2, msg.encode())
+                except Exception:
+                    pass
+                os._exit(1)
 
         # Parent process
         os.close(slave_fd)
@@ -302,9 +315,18 @@ class ClaudeCodeExecutor:
 
         # Wait for process exit
         exit_code = await self._wait_for_exit(process)
+        output = "\n".join(output_parts)
+
+        if exit_code != 0 and not output.strip():
+            logger.error(
+                "executor.empty_result_nonzero_exit",
+                task_id=task.id,
+                exit_code=exit_code,
+                hint="child process likely crashed before producing output (bad work_dir, missing claude binary, etc.)",
+            )
 
         return TaskResult(
-            output="\n".join(output_parts),
+            output=output,
             exit_code=exit_code,
             session_id=session_id,
             usage=usage,

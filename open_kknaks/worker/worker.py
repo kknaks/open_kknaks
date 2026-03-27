@@ -304,15 +304,31 @@ class ClaudeWorker:
                 on_chunk=_on_chunk,
             )
 
-            # Success
-            task.status = TaskStatus.DONE
+            # Check exit code
             task.result = result.output
             task.exit_code = result.exit_code
             task.result_session_id = result.session_id
             task.usage = result.usage
             task.finished_at = datetime.now(timezone.utc)
-            await self.broker.update_task(task)
-            await self.broker.ack(task.queue, task.id)
+
+            if result.exit_code != 0:
+                task.status = TaskStatus.FAILED
+                task.error = (
+                    result.output[:500]
+                    if result.output.strip()
+                    else (f"Process exited with code {result.exit_code} (empty output)")
+                )
+                logger.error(
+                    "task.failed",
+                    task_id=task.id,
+                    exit_code=result.exit_code,
+                    error=task.error[:200],
+                )
+                await self.broker.update_task(task)
+            else:
+                task.status = TaskStatus.DONE
+                await self.broker.update_task(task)
+                await self.broker.ack(task.queue, task.id)
 
         except TaskCancelledError:
             task.status = TaskStatus.CANCELLED
