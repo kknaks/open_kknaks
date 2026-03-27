@@ -223,9 +223,7 @@ class ClaudeCodeExecutor:
 
                 if idle_left <= 0:
                     await process.terminate()
-                    raise IdleTimeoutError(
-                        f"Task {task.id} no output for {IDLE_TIMEOUT}s"
-                    )
+                    raise IdleTimeoutError(f"Task {task.id} no output for {IDLE_TIMEOUT}s")
 
                 with contextlib.suppress(TimeoutError):
                     await asyncio.wait_for(done.wait(), timeout=max(wait_time, 0.1))

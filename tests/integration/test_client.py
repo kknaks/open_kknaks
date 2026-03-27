@@ -33,7 +33,9 @@ class TestSubmit:
 
     @pytest.mark.asyncio
     async def test_submit_creates_task_in_broker(
-        self, client: ClaudeClient, broker: RedisBroker,
+        self,
+        client: ClaudeClient,
+        broker: RedisBroker,
     ) -> None:
         task_id = await client.submit("test prompt", queue="myqueue")
         task = await broker.get_task(task_id)
@@ -43,7 +45,9 @@ class TestSubmit:
 
     @pytest.mark.asyncio
     async def test_submit_with_priority(
-        self, client: ClaudeClient, broker: RedisBroker,
+        self,
+        client: ClaudeClient,
+        broker: RedisBroker,
     ) -> None:
         task_id = await client.submit("high priority", priority=Priority.HIGH)
         task = await broker.get_task(task_id)
@@ -52,7 +56,9 @@ class TestSubmit:
 
     @pytest.mark.asyncio
     async def test_submit_with_overrides(
-        self, client: ClaudeClient, broker: RedisBroker,
+        self,
+        client: ClaudeClient,
+        broker: RedisBroker,
     ) -> None:
         task_id = await client.submit(
             "test",
@@ -70,7 +76,9 @@ class TestSubmit:
 
     @pytest.mark.asyncio
     async def test_submit_with_delay(
-        self, client: ClaudeClient, broker: RedisBroker,
+        self,
+        client: ClaudeClient,
+        broker: RedisBroker,
     ) -> None:
         await client.submit("delayed", delay_seconds=60)
         # Task should be in delayed queue, not main
@@ -94,7 +102,9 @@ class TestStatus:
 class TestResult:
     @pytest.mark.asyncio
     async def test_result_already_done(
-        self, client: ClaudeClient, broker: RedisBroker,
+        self,
+        client: ClaudeClient,
+        broker: RedisBroker,
     ) -> None:
         task_id = await client.submit("test")
         # Manually mark as done

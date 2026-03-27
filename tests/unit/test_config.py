@@ -50,12 +50,14 @@ class TestMergeTaskOverrides:
 
     def test_multiple_overrides(self) -> None:
         base = ClaudeConfig()
-        merged = base.merge_task_overrides({
-            "model": "opus",
-            "effort": "high",
-            "max_turns": 5,
-            "allowed_tools": ["bash", "read"],
-        })
+        merged = base.merge_task_overrides(
+            {
+                "model": "opus",
+                "effort": "high",
+                "max_turns": 5,
+                "allowed_tools": ["bash", "read"],
+            }
+        )
         assert merged.model == "opus"
         assert merged.effort == "high"
         assert merged.max_turns == 5

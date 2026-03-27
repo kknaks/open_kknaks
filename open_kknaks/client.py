@@ -92,7 +92,9 @@ class ClaudeClient:
             async for _event in self.broker.subscribe_chunks(task_id):
                 t = await self.broker.get_task(task_id)
                 if t and t.status in (
-                    TaskStatus.DONE, TaskStatus.FAILED, TaskStatus.CANCELLED,
+                    TaskStatus.DONE,
+                    TaskStatus.FAILED,
+                    TaskStatus.CANCELLED,
                 ):
                     return t
             return None

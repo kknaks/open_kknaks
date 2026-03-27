@@ -76,7 +76,7 @@ class RetriesMiddleware(Middleware):
 
         # Calculate backoff delay
         delay = min(
-            self.min_backoff * (self.backoff_factor ** task.retry_count),
+            self.min_backoff * (self.backoff_factor**task.retry_count),
             self.max_backoff,
         )
 

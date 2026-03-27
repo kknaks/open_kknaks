@@ -64,7 +64,10 @@ class TestLoggingMiddleware:
         task = Task(prompt="test")
         await mw.before_process(broker, task)
         await mw.after_process(
-            broker, task, result=None, exception=RuntimeError("boom"),
+            broker,
+            task,
+            result=None,
+            exception=RuntimeError("boom"),
         )
 
 
@@ -77,7 +80,10 @@ class TestRetriesMiddleware:
         await broker.dequeue(["default"], timeout=0)
 
         await mw.after_process(
-            broker, task, result=None, exception=RuntimeError("fail"),
+            broker,
+            task,
+            result=None,
+            exception=RuntimeError("fail"),
         )
 
         assert task.retry_count == 1
@@ -88,7 +94,10 @@ class TestRetriesMiddleware:
         mw = RetriesMiddleware()
         task = Task(prompt="billing", queue="default")
         await mw.after_process(
-            broker, task, result=None, exception=BillingError("402"),
+            broker,
+            task,
+            result=None,
+            exception=BillingError("402"),
         )
         assert task.retry_count == 0
 
@@ -97,7 +106,10 @@ class TestRetriesMiddleware:
         mw = RetriesMiddleware()
         task = Task(prompt="auth", queue="default")
         await mw.after_process(
-            broker, task, result=None, exception=ClaudeAuthError("401"),
+            broker,
+            task,
+            result=None,
+            exception=ClaudeAuthError("401"),
         )
         assert task.retry_count == 0
 
@@ -106,7 +118,10 @@ class TestRetriesMiddleware:
         mw = RetriesMiddleware()
         task = Task(prompt="cancel", queue="default")
         await mw.after_process(
-            broker, task, result=None, exception=TaskCancelledError("cancelled"),
+            broker,
+            task,
+            result=None,
+            exception=TaskCancelledError("cancelled"),
         )
         assert task.retry_count == 0
 
@@ -123,16 +138,19 @@ class TestRetriesMiddleware:
         mw = RetriesMiddleware(max_retries=2)
         task = Task(prompt="exhausted", queue="default", retry_count=2, max_retries=2)
         await mw.after_process(
-            broker, task, result=None, exception=RuntimeError("fail"),
+            broker,
+            task,
+            result=None,
+            exception=RuntimeError("fail"),
         )
         assert task.retry_count == 2  # Not incremented
 
     def test_exponential_backoff(self) -> None:
         mw = RetriesMiddleware(min_backoff=5.0, backoff_factor=2.0, max_backoff=300.0)
         # Verify backoff formula: min_backoff * (factor ^ retry_count)
-        assert min(mw.min_backoff * (mw.backoff_factor ** 0), mw.max_backoff) == 5.0
-        assert min(mw.min_backoff * (mw.backoff_factor ** 1), mw.max_backoff) == 10.0
-        assert min(mw.min_backoff * (mw.backoff_factor ** 2), mw.max_backoff) == 20.0
+        assert min(mw.min_backoff * (mw.backoff_factor**0), mw.max_backoff) == 5.0
+        assert min(mw.min_backoff * (mw.backoff_factor**1), mw.max_backoff) == 10.0
+        assert min(mw.min_backoff * (mw.backoff_factor**2), mw.max_backoff) == 20.0
 
 
 class TestTimeoutMiddleware:
@@ -193,7 +211,10 @@ class TestCostMiddleware:
         mw = CostMiddleware(on_budget_alert=on_alert)
         task = Task(prompt="test")
         await mw.after_process(
-            broker, task, result=None, exception=BillingError("402"),
+            broker,
+            task,
+            result=None,
+            exception=BillingError("402"),
         )
         assert len(alerts) == 1
         assert "billing" in alerts[0].lower()
@@ -212,8 +233,12 @@ class TestRateLimitMiddleware:
         original_rpm = mw._current_rpm
         task = Task(prompt="test")
         from open_kknaks.exceptions import RateLimitError
+
         await mw.after_process(
-            broker, task, result=None, exception=RateLimitError("429"),
+            broker,
+            task,
+            result=None,
+            exception=RateLimitError("429"),
         )
         assert mw._current_rpm < original_rpm
 
@@ -251,7 +276,10 @@ class TestCallbackMiddleware:
         mw = CallbackMiddleware(on_failure=on_failure)
         task = Task(prompt="test")
         await mw.after_process(
-            broker, task, result=None, exception=RuntimeError("boom"),
+            broker,
+            task,
+            result=None,
+            exception=RuntimeError("boom"),
         )
         assert len(errors) == 1
 

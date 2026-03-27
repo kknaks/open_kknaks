@@ -3,19 +3,21 @@
 from pydantic import BaseModel, ConfigDict
 
 # Fields that Task IS allowed to override
-OVERRIDABLE_FIELDS: frozenset[str] = frozenset({
-    "model",
-    "system_prompt",
-    "append_system_prompt",
-    "max_turns",
-    "effort",
-    "json_schema",
-    "allowed_tools",
-    "disallowed_tools",
-    "permission_mode",
-    "mcp_config",
-    "add_dirs",
-})
+OVERRIDABLE_FIELDS: frozenset[str] = frozenset(
+    {
+        "model",
+        "system_prompt",
+        "append_system_prompt",
+        "max_turns",
+        "effort",
+        "json_schema",
+        "allowed_tools",
+        "disallowed_tools",
+        "permission_mode",
+        "mcp_config",
+        "add_dirs",
+    }
+)
 
 
 class ClaudeConfig(BaseModel):

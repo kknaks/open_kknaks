@@ -236,7 +236,10 @@ class RedisBroker(AbstractBroker):
     # ─── Worker Management ───
 
     async def register_worker(
-        self, worker_id: str, queues: list[str], extra: dict[str, str] | None = None,
+        self,
+        worker_id: str,
+        queues: list[str],
+        extra: dict[str, str] | None = None,
     ) -> None:
         info: dict[str, object] = {
             "queues": queues,

@@ -95,7 +95,9 @@ class BatchRunner:
                 for task_id in list(pending):
                     task = await self.broker.get_task(task_id)
                     if task and task.status in (
-                        TaskStatus.DONE, TaskStatus.FAILED, TaskStatus.CANCELLED,
+                        TaskStatus.DONE,
+                        TaskStatus.FAILED,
+                        TaskStatus.CANCELLED,
                     ):
                         results.append(task)
                         done.add(task_id)

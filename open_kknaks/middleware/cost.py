@@ -49,9 +49,7 @@ class CostMiddleware(Middleware):
         if self.global_budget_usd is not None:
             total = await broker.get_total_cost()
             if total >= self.global_budget_usd:
-                raise BudgetExceededError(
-                    f"Global budget exceeded: ${total:.4f} >= ${self.global_budget_usd:.4f}"
-                )
+                raise BudgetExceededError(f"Global budget exceeded: ${total:.4f} >= ${self.global_budget_usd:.4f}")
 
     async def after_process(
         self,
@@ -65,8 +63,7 @@ class CostMiddleware(Middleware):
         # Handle API billing error (HTTP 402)
         if isinstance(exception, BillingError) and not isinstance(exception, BudgetExceededError):
             await self._alert(
-                f"API billing error: {exception}. "
-                "Anthropic billing issue detected. Worker shutdown recommended."
+                f"API billing error: {exception}. Anthropic billing issue detected. Worker shutdown recommended."
             )
             return
 
@@ -92,18 +89,14 @@ class CostMiddleware(Middleware):
             ratio = self._worker_spent / self.worker_budget_usd
             if ratio >= self.alert_threshold:
                 await self._alert(
-                    f"Worker budget alert: ${self._worker_spent:.4f} / "
-                    f"${self.worker_budget_usd:.4f} ({ratio:.0%})"
+                    f"Worker budget alert: ${self._worker_spent:.4f} / ${self.worker_budget_usd:.4f} ({ratio:.0%})"
                 )
 
         if self.global_budget_usd is not None:
             total = await broker.get_total_cost()
             ratio = total / self.global_budget_usd
             if ratio >= self.alert_threshold:
-                await self._alert(
-                    f"Global budget alert: ${total:.4f} / "
-                    f"${self.global_budget_usd:.4f} ({ratio:.0%})"
-                )
+                await self._alert(f"Global budget alert: ${total:.4f} / ${self.global_budget_usd:.4f} ({ratio:.0%})")
 
     async def _alert(self, message: str) -> None:
         """Send budget alert via callback or log."""

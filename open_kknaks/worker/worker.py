@@ -66,7 +66,9 @@ class ClaudeWorker:
         try:
             result = subprocess.run(
                 [claude_bin, "--version"],
-                capture_output=True, text=True, timeout=5,
+                capture_output=True,
+                text=True,
+                timeout=5,
             )
             version = result.stdout.strip() if result.returncode == 0 else "unknown"
         except Exception:
@@ -196,9 +198,17 @@ class ClaudeWorker:
         """Merge worker config with task-level overrides."""
         overrides: dict[str, object] = {}
         for field in (
-            "model", "system_prompt", "append_system_prompt", "max_turns",
-            "effort", "json_schema", "allowed_tools", "disallowed_tools",
-            "permission_mode", "mcp_config", "add_dirs",
+            "model",
+            "system_prompt",
+            "append_system_prompt",
+            "max_turns",
+            "effort",
+            "json_schema",
+            "allowed_tools",
+            "disallowed_tools",
+            "permission_mode",
+            "mcp_config",
+            "add_dirs",
         ):
             value = getattr(task, field, None)
             if value is not None:
@@ -323,7 +333,10 @@ class ClaudeWorker:
             for mw in reversed(called_middlewares):
                 try:
                     await mw.after_process(
-                        self.broker, task, result=result, exception=exception,
+                        self.broker,
+                        task,
+                        result=result,
+                        exception=exception,
                     )
                 except Exception:
                     logger.error(

@@ -80,7 +80,10 @@ class AbstractBroker(ABC):
 
     @abstractmethod
     async def register_worker(
-        self, worker_id: str, queues: list[str], extra: dict[str, str] | None = None,
+        self,
+        worker_id: str,
+        queues: list[str],
+        extra: dict[str, str] | None = None,
     ) -> None:
         """Register worker and its queue subscriptions."""
 
