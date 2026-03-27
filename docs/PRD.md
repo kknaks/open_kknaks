@@ -1,9 +1,10 @@
 # open_kknaks — PRD (Product Requirements Document)
 
-> **Version:** 1.0
+> **Version:** 2.0
 > **Created:** 2026-03-25
-> **Author:** 기획자 에이전트
+> **Updated:** 2026-03-26
 > **Status:** Draft
+> **기반 문서:** ARCHITECTURE_V2.md, CLAUDE_CODE_ANALYSIS.md
 
 ---
 
@@ -11,24 +12,27 @@
 
 ### 1.1 한 줄 정의
 
-Claude Code CLI를 실행하는 **전용 태스크 큐 라이브러리** — Dramatiq 구조를 차용하되, 워커의 작업이 Claude Code CLI 호출로 고정된 Python async 패키지.
+Claude Code CLI를 **PTY 기반으로 안정적으로 실행**하는 프로듀서/워커 분리형 태스크 큐 라이브러리.
 
 ### 1.2 문제 정의
 
 | 문제 | 설명 |
 |---|---|
-| 반복 보일러플레이트 | Claude Code CLI를 subprocess/pty로 호출하는 코드를 매번 작성해야 함 |
+| 반복 보일러플레이트 | Claude Code CLI를 subprocess로 호출하는 코드를 매번 작성해야 함 |
+| 프로세스 누수 | Pipe 방식은 Claude Code 내부 자식 프로세스(Node.js 등)를 정리하지 못함 → 고아/좀비 누적 |
+| 버퍼 데드락 | stdout/stderr 동시 PIPE 시 OS 버퍼(64KB) 포화로 프로세스 블록 |
 | 큐잉/동시성 부재 | 여러 작업을 순차/병렬 처리하려면 자체 큐 로직 필요 |
-| 스트리밍 어려움 | CLI 출력을 실시간 청크로 전달하려면 pty 파싱 + pub/sub 구현 필요 |
-| 재시도/우선순위 없음 | 실패 복구, 우선순위 큐, 지연 실행 등 운영 기능이 없음 |
-| 통합 불편 | MCP 클라이언트(Claude Desktop 등)에서 Claude Code를 원격 실행할 표준 인터페이스 없음 |
+| 스트리밍 지연 | Pipe 블록 버퍼링(~4KB)으로 실시간 청크 전달 지연 |
+| 행(Hang) 감지 불가 | Pipe readline()이 블록되면 전체 타임아웃(600s)까지 대기 |
+| 재시도/우선순위 없음 | 실패 복구, 우선순위 큐, DLQ, 지연 실행 등 운영 기능이 없음 |
 
 ### 1.3 해결 방향
 
-- **라이브러리 레벨** — 프레임워크가 아닌, `pip install`로 끝나는 라이브러리
-- **단일 책임** — Claude Code CLI 실행 + 큐 관리 + 결과 반환만 담당. 트리거(webhook, cron 등)는 유저 코드에서 붙임
-- **Dramatiq 패턴** — Broker ↔ Worker ↔ Runner 분리, 브로커 추상화, 미들웨어 파이프라인
-- **PyPI 배포** — `open-kknaks`로 배포, Python 3.10+
+- **PTY 기반 Executor** — `os.fork()` + `os.setsid()`로 세션 리더 생성, 프로세스 트리 전체 관리
+- **프로듀서/워커 완전 분리** — `ClaudeClient`(등록)와 `ClaudeWorker`(실행)는 별개 프로세스
+- **Redis 브로커** — 멀티 큐 라우팅, DLQ, at-least-once delivery
+- **라이브러리 레벨** — `pip install open-kknaks[redis]`로 끝나는 패키지
+- **PyPI 배포** — `open-kknaks`, Python 3.10+, Linux/macOS
 
 ### 1.4 타겟 유저
 
@@ -37,35 +41,49 @@ Claude Code CLI를 실행하는 **전용 태스크 큐 라이브러리** — Dra
 | **백엔드 개발자** | 서버 이벤트(에러 로그, Jira 이슈) → Claude Code 자동 분석 파이프라인 구축 |
 | **DevOps 엔지니어** | CI 실패 → Claude Code 원인 분석 → PR 코멘트 자동화 |
 | **AI 도구 빌더** | MCP 서버로 노출하여 Claude Desktop에서 원격 Claude Code 호출 |
-| **솔로 개발자** | 로컬에서 여러 작업을 큐에 넣고 병렬 처리 |
+| **플랫폼 빌더** | 다수의 Claude Code 에이전트를 동시에 안정적으로 운영 |
 
 ---
 
-## 2. Dramatiq 구조 매핑
+## 2. 핵심 설계 결정
 
-Dramatiq의 핵심 개념을 open_kknaks에 1:1 대응시킨다.
+### 2.1 PTY를 선택한 이유
 
-| Dramatiq | open_kknaks | 차이점 |
+기존 프로젝트(app_builder_local, persona_counselor)는 모두 `asyncio.create_subprocess_exec` + PIPE를 사용.
+라이브러리 수준의 안정성을 위해 PTY로 전환한다.
+
+| 항목 | Pipe 방식 (기존) | PTY 방식 (open_kknaks) |
 |---|---|---|
-| `@dramatiq.actor` | (없음 — 고정 actor) | 실행 함수가 Claude Code CLI 호출로 고정. 유저가 actor를 정의하지 않음 |
-| `Broker` | `AbstractBroker` | 동일한 역할. InMemory / Redis 기본 제공 |
-| `Worker` | `Worker` | 큐에서 작업을 꺼내 Claude Code CLI 실행. 동시성(concurrency) 제어 포함 |
-| `Message` | `Task` | 작업 단위. prompt + context + 메타데이터 |
-| `Middleware` | `Middleware` | 동일 패턴. 작업 전/후 훅 (로깅, 비용 추적 등) |
-| `send()` / `send_with_options()` | `runner.submit()` | 작업 등록 진입점 |
-| `message.get_result()` | `runner.result()` | 결과 조회 |
-| `GroupCallback` | `batch_submit()` | 배치 작업 |
-| Result Backend | Broker에 통합 | 별도 result backend 없이 브로커가 결과도 저장 |
+| 프로세스 그룹 | 없음 (직접 자식만) | `os.setsid()` → 세션 리더 |
+| 고아 프로세스 | Claude 내부 자식 누수 | SIGHUP 전파로 전체 정리 |
+| 버퍼 데드락 | stdout/stderr 동시 PIPE 위험 | 단일 master_fd — 불가능 |
+| 출력 버퍼링 | 블록 버퍼(~4KB 뭉침) | 라인 즉시 전달 |
+| 행 감지 | 라인 타임아웃 → continue → 600s 대기 | idle_timeout → 즉시 예외 |
+| 종료 | SIGTERM → SIGKILL (2단계) | SIGHUP → SIGTERM → SIGKILL (3단계) |
+| concurrency | 좀비 누적 위험 | 세션별 격리 — 안전 |
+| 플랫폼 | Linux/macOS/Windows | **Linux/macOS** (Windows 미지원) |
 
-### 2.1 Dramatiq에 없는 추가 기능
+### 2.2 프로듀서/워커 분리
 
-| 기능 | 설명 |
-|---|---|
-| **실시간 스트리밍** | pty 기반 청크 스트리밍 (async generator) |
-| **MCP 서버** | 라이브러리 자체를 MCP 서버로 노출 |
-| **Claude Code 전용 옵션** | `--model`, `--allowedTools`, `--append-system-prompt` 등 CLI 플래그 매핑 |
-| **세션 관리** | `--continue`, `--resume` 기반 대화 이어가기 |
-| **비용 추적** | stream-json 이벤트에서 토큰 사용량 파싱 |
+v1의 `ClaudeRunner` 일체형을 `ClaudeClient` + `ClaudeWorker`로 분리.
+
+```
+ClaudeClient ──enqueue──▶ RedisBroker ◀──dequeue── ClaudeWorker
+                              │                        │
+                              │                   ClaudeConfig
+                              │                        │
+                         Middleware                 PTY Executor
+```
+
+- `ClaudeClient`: 작업 등록 + 상태/결과 조회. Claude Code CLI와 무관.
+- `ClaudeWorker`: 큐에서 작업을 꺼내 PTY로 Claude Code CLI 실행.
+- 같은 프로세스에서 실행할 수도 있고, 별도 프로세스/머신에서 실행할 수도 있음.
+
+### 2.3 InMemoryBroker 제거
+
+- Redis가 유일한 브로커 구현
+- 테스트는 mock/fixture 사용
+- InMemoryBroker의 "단일 프로세스 한정" 제약이 프로듀서/워커 분리 원칙에 위배
 
 ---
 
@@ -74,63 +92,83 @@ Dramatiq의 핵심 개념을 open_kknaks에 1:1 대응시킨다.
 ### 3.1 전체 흐름
 
 ```
-유저 코드
-  │
-  ├─ runner.submit(prompt, context, ...)
-  │
-  ▼
-Middleware Pipeline (before_enqueue)
-  │
-  ▼
-Broker (InMemory / Redis)
-  │  enqueue → 우선순위 큐
-  │
-  ▼
-Worker (N개 동시 실행)
-  │  dequeue → Middleware(before_process)
-  │
-  ▼
-ClaudeCodeExecutor
-  │  claude -p "prompt" --output-format stream-json ...
-  │  (asyncio subprocess, pty spawn)
-  │
-  ├─ 청크 → broker.publish_chunk(task_id, chunk)
-  │         → 유저: runner.stream(task_id)
-  │
-  ▼
-Middleware Pipeline (after_process / after_skip)
-  │
-  ▼
-결과 저장 (broker 내장)
-  │
-  ▼
-유저: runner.result(task_id) / runner.status(task_id)
+┌─────────────────────────────────────────────────────────┐
+│                     유저 코드 (프로듀서)                    │
+│                                                         │
+│  client = ClaudeClient(broker=RedisBroker(...))         │
+│  await client.submit("분석해줘", queue="error-analysis") │
+└──────────────────────┬──────────────────────────────────┘
+                       │ enqueue
+                       ▼
+┌─────────────────────────────────────────────────────────┐
+│                   RedisBroker                            │
+│                                                         │
+│  큐: error-analysis, pr-review, default, ...            │
+│  DLQ: {queue}.dlq                                       │
+│  스트림: stream:{task_id}                                │
+│  상태: task:{task_id}                                    │
+└──────┬──────────────────────────────┬───────────────────┘
+       │ consume("error-analysis")    │ consume("pr-review")
+       ▼                              ▼
+┌──────────────────┐    ┌──────────────────┐
+│   Worker A       │    │   Worker B       │
+│                  │    │                  │
+│ queues:          │    │ queues:          │
+│  - error-analysis│    │  - pr-review     │
+│ work_dir:        │    │ work_dir:        │
+│  /my/backend     │    │  /my/frontend    │
+│ concurrency: 4   │    │ concurrency: 2   │
+│                  │    │                  │
+│ ┌──────────────┐ │    │ ┌──────────────┐ │
+│ │ PTY Executor │ │    │ │ PTY Executor │ │
+│ │ os.fork()    │ │    │ │ os.fork()    │ │
+│ │ os.setsid()  │ │    │ │ os.setsid()  │ │
+│ │ claude -p .. │ │    │ │ claude -p .. │ │
+│ └──────────────┘ │    │ └──────────────┘ │
+└──────────────────┘    └──────────────────┘
 ```
 
 ### 3.2 컴포넌트 상세
 
-#### 3.2.1 ClaudeRunner (client.py) — 유저 진입점
+#### 3.2.1 ClaudeClient (프로듀서)
 
-유저가 직접 다루는 유일한 객체. 내부적으로 Broker + Worker를 조립한다.
+작업을 큐에 넣고, 상태/결과를 조회하는 얇은 클라이언트. **워커를 실행하지 않는다.**
 
 ```python
-from open_kknaks import ClaudeRunner
+from open_kknaks import ClaudeClient
 from open_kknaks.broker import RedisBroker
 
-runner = ClaudeRunner(
-    work_dir="/my/project",              # Claude Code 작업 디렉토리
-    claude_bin=None,                      # None이면 PATH 자동 탐색
-    model=None,                           # 기본 모델 (--model)
-    allowed_tools=None,                   # 기본 허용 도구 (--allowedTools)
-    append_system_prompt=None,            # 추가 시스템 프롬프트
-    max_turns=None,                       # 최대 에이전트 턴 수
-    permission_mode="default",            # default / plan / bypassPermissions
-    bare=True,                            # --bare 모드 (기본 활성화, 스크립트 권장)
-    timeout=600,                          # 기본 타임아웃 (초)
-    max_retries=0,                        # 기본 재시도 횟수
-    broker=RedisBroker("redis://localhost:6379"),
-    middlewares=[],                        # 미들웨어 리스트
-    concurrency=4,                        # 워커 동시 실행 수
+client = ClaudeClient(
+    broker=RedisBroker(url="redis://localhost:6379", namespace="myapp"),
+)
+
+# 작업 등록
+task_id = await client.submit(
+    prompt="이 에러 분석해줘",
+    context=error_log,
+    queue="error-analysis",
+    priority="high",
+    timeout=600,
+    max_retries=3,
+    metadata={"source": "sentry", "issue_id": "PROJ-123"},
+)
+
+# 결과 조회
+status = await client.status(task_id)
+result = await client.result(task_id, timeout=600)
+
+# 스트리밍
+async for event in client.stream(task_id):
+    print(event.text, end="")
+
+# 배치
+batch_id = await client.batch_submit(
+    tasks=[
+        {"prompt": "이슈 1", "context": ctx1},
+        {"prompt": "이슈 2", "context": ctx2},
+    ],
+    queue="error-analysis",
+    mode="parallel",
 )
 ```
 
@@ -138,291 +176,413 @@ runner = ClaudeRunner(
 
 | 메서드 | 설명 |
 |---|---|
-| `submit(prompt, *, context, priority, delay_seconds, timeout, max_retries, session_id, continue_session, model, allowed_tools, append_system_prompt, max_turns, permission_mode, bare, metadata) → str` | 작업 등록 → task_id 반환 |
+| `submit(prompt, *, context, queue, priority, delay_seconds, timeout, max_retries, model, system_prompt, append_system_prompt, max_turns, effort, json_schema, allowed_tools, disallowed_tools, permission_mode, session_id, mcp_config, add_dirs, metadata) → str` | 작업 등록 → task_id 반환. work_dir/claude_bin은 보안상 Task에서 오버라이드 불가 |
 | `stream(task_id) → AsyncIterator[StreamEvent]` | 실시간 청크 스트리밍 |
 | `status(task_id) → TaskStatus` | 작업 상태 조회 |
 | `result(task_id, *, timeout) → TaskResult` | 완료 대기 + 결과 반환 |
-| `cancel(task_id) → bool` | 실행 중 작업 취소 (SIGTERM → SIGKILL) |
-| `retry(task_id) → str` | 실패 작업 재시도 → 새 task_id 반환 |
-| `batch_submit(tasks, *, mode) → str` | 배치 작업 등록 → batch_id 반환 |
+| `cancel(task_id) → bool` | 실행 중 작업 취소 |
+| `batch_submit(tasks, *, queue, mode) → str` | 배치 작업 등록 → batch_id 반환 |
 | `batch_status(batch_id) → BatchStatus` | 배치 상태 조회 |
-| `batch_stream(batch_id) → AsyncIterator[StreamEvent]` | 배치 내 모든 작업 스트리밍 |
 | `batch_wait(batch_id, *, timeout) → list[TaskResult]` | 배치 완료 대기 |
-| `batch_cancel(batch_id) → bool` | 배치 전체 취소 |
-| `start() → None` | 워커 시작 (submit 시 자동 호출, 명시적 호출 가능) |
-| `stop() → None` | 워커 그레이스풀 종료 |
-| `__aenter__ / __aexit__` | async context manager 지원 |
 
-#### 3.2.2 Task (task.py) — 작업 단위
+**`result()` / `stream()` 구현 방식:**
+
+둘 다 **XREAD BLOCK** 기반이며 `broker.subscribe_chunks(task_id)`를 공유한다. 폴링 안 씀.
+
+| 메서드 | 동작 |
+|---|---|
+| `result(task_id, *, timeout)` | `subscribe_chunks`로 청크는 무시하고 완료 신호만 대기 → `broker.get_task()` 1회 호출로 최종 결과 반환 |
+| `stream(task_id)` | `subscribe_chunks`로 청크를 `AsyncIterator[StreamEvent]`로 yield |
+
+#### 3.2.2 ClaudeWorker (소비자)
+
+큐에서 Task를 꺼내 PTY 기반으로 Claude Code CLI를 실행한다.
 
 ```python
-from enum import Enum
-from dataclasses import dataclass, field
-from datetime import datetime
+from open_kknaks.worker import ClaudeWorker
+from open_kknaks.broker import RedisBroker
 
-class TaskStatus(Enum):
-    PENDING = "pending"          # 큐 대기
-    RUNNING = "running"          # 실행 중
-    DONE = "done"                # 성공 완료
-    FAILED = "failed"            # 실패
-    CANCELLED = "cancelled"      # 취소됨
-    RETRYING = "retrying"        # 재시도 대기
+worker = ClaudeWorker(
+    broker=RedisBroker(url="redis://localhost:6379", namespace="myapp"),
 
-class Priority(Enum):
-    HIGH = 1
-    NORMAL = 5
-    LOW = 9
+    # 어떤 큐를 소비할지
+    queues=["error-analysis", "general"],
 
-@dataclass
-class Task:
-    id: str                                # UUID
-    prompt: str                            # Claude Code에 보낼 프롬프트
-    context: str | None = None             # 추가 컨텍스트 (stdin 파이프)
+    # Claude Code 설정 (분리된 객체)
+    claude=ClaudeConfig(
+        work_dir="/my/backend",
+        model="sonnet",
+        append_system_prompt="You are a backend error analyst.",
+        allowed_tools=["Read", "Bash(git log *)", "Bash(git diff *)"],
+    ),
+
+    # 워커 설정
+    concurrency=4,
+    poll_interval=0.5,
+    heartbeat_interval=30,
+    shutdown_timeout=300,
+)
+
+await worker.run()  # 블로킹
+```
+
+**Worker 기본값 vs Task 오버라이드:**
+
+병합 위치: `Worker._merge_config(task)` — `ClaudeConfig.model_copy(update={})` 사용 (MergedConfig 별도 클래스 없음).
+
+```
+최종 실행 설정 = Worker 기본값(ClaudeConfig) ← Task 오버라이드 (Task에 명시된 것만 덮어씀)
+
+예: Worker(model="sonnet") + Task(model=None)  → sonnet
+    Worker(model="sonnet") + Task(model="opus") → opus
+```
+
+**오버라이드 가능 필드 (화이트리스트):**
+- `model`, `system_prompt`, `append_system_prompt`, `max_turns`, `effort`, `json_schema`
+- `allowed_tools`, `disallowed_tools`, `permission_mode`
+- `mcp_config`, `add_dirs`
+
+**오버라이드 불가 (보안):**
+- `work_dir`, `claude_bin` — Task에서 지정 불가. Worker의 ClaudeConfig 값만 사용.
+
+**Worker 내부 구조:**
+
+```
+ClaudeWorker
+  │
+  ├─ DequeueLoop (asyncio.Task × 1)
+  │   │  여러 큐를 라운드로빈으로 폴링
+  │   │  dequeue → internal PriorityQueue에 넣기
+  │   └─ delayed task 체크 (eta 지난 것 → 메인 큐로 이동)
+  │
+  ├─ ProcessorLoop (asyncio.Task × concurrency)
+  │   │  internal queue에서 꺼내기
+  │   │  emit_before("process")
+  │   │  executor.execute(task)  ← PTY 기반 Executor
+  │   │  emit_after("process", result | exception)
+  │   │  ack 또는 nack
+  │   └─ 실패 시: Retries 미들웨어가 delay 재큐잉 또는 DLQ
+  │
+  ├─ HeartbeatLoop (asyncio.Task × 1)
+  │   └─ broker.heartbeat(worker_id) 주기적 호출
+  │
+  └─ SignalHandler
+      ├─ SIGTERM → graceful shutdown (PTY 세션 전체 SIGHUP)
+      └─ SIGINT  → graceful shutdown (2번 누르면 즉시 종료)
+```
+
+**그레이스풀 셧다운:**
+
+```
+stop() 호출
+  │
+  ├─ 1) _running = False → dequeue 루프 정지
+  │
+  ├─ 2) 실행 중 작업 완료 대기 (shutdown_timeout)
+  │     ├─ timeout 내 완료 → 정상 ack
+  │     └─ timeout 초과:
+  │           ├─ SIGHUP → PTY 세션 전체 (프로세스 그룹) 종료 시도
+  │           ├─ 5초 대기
+  │           ├─ SIGTERM → 개별 프로세스
+  │           ├─ 5초 대기
+  │           └─ SIGKILL → 강제 종료 + master_fd close
+  │
+  ├─ 3) internal queue에 남은 미처리 Task → broker.requeue()
+  │
+  └─ 4) broker.close()
+```
+
+#### 3.2.3 ClaudeConfig (Claude Code CLI 설정)
+
+Worker의 Claude Code CLI 실행 환경을 담는 설정 객체. 여러 Worker에서 재사용 가능.
+
+```python
+class ClaudeConfig(BaseModel):
+    # 환경
+    work_dir: str = "."
+    claude_bin: str | None = None         # None이면 PATH 자동 탐색
+
+    # LLM / 프롬프트
+    model: str | None = None              # --model
+    system_prompt: str | None = None      # --system-prompt (전체 교체)
+    append_system_prompt: str | None = None  # --append-system-prompt (추가)
+    max_turns: int | None = None          # --max-turns
+    effort: str | None = None             # --effort (low/medium/high/max)
+    json_schema: str | None = None        # --json-schema
+
+    # 도구 / 권한
+    allowed_tools: list[str] | None = None      # --allowedTools
+    disallowed_tools: list[str] | None = None   # --disallowedTools
+    permission_mode: str = "default"             # --permission-mode
+
+    # 세션 / 환경
+    mcp_config: str | None = None         # --mcp-config
+    add_dirs: list[str] | None = None     # --add-dir
+```
+
+#### 3.2.4 PTY Executor — 핵심 실행 엔진
+
+PTY 기반으로 Claude Code CLI를 실행하는 핵심 컴포넌트.
+
+```
+Executor.execute(task, config, on_chunk)
+  │
+  ├─ 1) _build_command(task, config) → cmd: list[str]
+  │
+  ├─ 2) PTY 생성 + 프로세스 스폰
+  │     │  master_fd, slave_fd = pty.openpty()
+  │     │  pid = os.fork()
+  │     │  자식: os.setsid() → 새 세션 리더 (핵심!)
+  │     │  부모: master_fd → asyncio 이벤트 루프에 등록
+  │     └─ PTYProcess(pid, master_fd, pgid=pid) 생성
+  │
+  ├─ 3) 출력 읽기 루프 (asyncio)
+  │     │  loop.add_reader(master_fd, _on_data)
+  │     │  os.read(master_fd, 4096) → LineBuffer → parse_stream_json_line()
+  │     │  text chunk → on_chunk() 콜백 (Redis Stream)
+  │     │  전체 타임아웃 + idle 타임아웃 동시 감시
+  │     └─ EIO/EOF → 프로세스 종료 감지
+  │
+  ├─ 4) 프로세스 종료 대기 + 좀비 수거
+  │
+  └─ 5) TaskResult 반환
+```
+
+**PTYProcess 3단계 종료:**
+
+```
+SIGHUP  → os.killpg(pgid, SIGHUP)   → PTY 세션 전체 (프로세스 그룹)
+    5초 대기
+SIGTERM → os.kill(pid, SIGTERM)      → 직접 프로세스
+    5초 대기
+SIGKILL → os.killpg(pgid, SIGKILL)  → 강제 종료
+```
+
+**CLI 플래그 매핑:**
+
+| 설정 필드 | CLI 플래그 | 비고 |
+|---|---|---|
+| `model` | `--model` | |
+| `system_prompt` | `--system-prompt` | 전체 교체 |
+| `append_system_prompt` | `--append-system-prompt` | 기본 프롬프트에 추가 |
+| `max_turns` | `--max-turns` | 없으면 무제한 |
+| `effort` | `--effort` | low/medium/high/max |
+| `json_schema` | `--json-schema` | 구조화 출력 |
+| `allowed_tools` | `--allowedTools` | |
+| `disallowed_tools` | `--disallowedTools` | |
+| `permission_mode` | `--permission-mode` / `--dangerously-skip-permissions` | |
+| `session_id` | `--resume` | 세션 이어가기 |
+| `mcp_config` | `--mcp-config` | MCP 서버 연결 |
+| `add_dirs` | `--add-dir` | 추가 접근 디렉토리 |
+| `context` | stdin 파이프 | |
+| (항상) | `--output-format stream-json` | 파싱용 고정 |
+| (항상) | `-p` | 비대화형 모드 |
+
+#### 3.2.5 Task 모델
+
+```python
+class Task(BaseModel):
+    model_config = ConfigDict(use_enum_values=True)
+
+    id: str = Field(default_factory=lambda: str(uuid4()))
+    prompt: str
+    context: str | None = None
+
+    # 라우팅
+    queue: str = "default"
+
+    # 상태
     status: TaskStatus = TaskStatus.PENDING
     priority: Priority = Priority.NORMAL
-    result: str | None = None              # 완료 시 결과 텍스트
-    error: str | None = None               # 실패 시 에러 메시지
-    exit_code: int | None = None           # CLI 종료 코드
-    session_id: str | None = None          # Claude Code 세션 ID (이어가기용)
-    batch_id: str | None = None            # 배치 소속 시
-    
-    # 실행 옵션 (Task별 오버라이드)
-    work_dir: str | None = None
+    delay_until: datetime | None = None
+
+    # 실행 옵션 (None이면 Worker 기본값 사용)
     model: str | None = None
-    allowed_tools: list[str] | None = None
+    system_prompt: str | None = None
     append_system_prompt: str | None = None
     max_turns: int | None = None
+    effort: str | None = None
+    json_schema: str | None = None
+    allowed_tools: list[str] | None = None
+    disallowed_tools: list[str] | None = None
     permission_mode: str | None = None
-    bare: bool | None = None
+    session_id: str | None = None
+    mcp_config: str | None = None
+    add_dirs: list[str] | None = None
     timeout: int | None = None
+
+    # 재시도
     max_retries: int = 0
     retry_count: int = 0
-    delay_until: datetime | None = None    # 지연 실행
-    metadata: dict = field(default_factory=dict)  # 유저 커스텀 메타
+    exception_type: str | None = None       # 마지막 실패 예외 클래스명 (예: "BillingError")
 
-    # 타임스탬프
-    created_at: datetime = field(default_factory=datetime.utcnow)
+    # 결과
+    result: str | None = None
+    error: str | None = None
+    exit_code: int | None = None
+    result_session_id: str | None = None
+    usage: TokenUsage | None = None
+
+    # 배치
+    batch_id: str | None = None
+
+    # 유저 메타
+    metadata: dict[str, str | int | float | bool | None] = Field(default_factory=dict)
+
+    # 타임스탬프 — datetime.now(timezone.utc) 사용
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     started_at: datetime | None = None
     finished_at: datetime | None = None
 
-    # 비용/토큰 (stream-json 파싱)
-    usage: TokenUsage | None = None
 
-@dataclass
-class TokenUsage:
-    input_tokens: int = 0
-    output_tokens: int = 0
-    cache_read_tokens: int = 0
-    cache_write_tokens: int = 0
-    cost_usd: float | None = None          # 계산 가능 시
+class TaskStatus(str, Enum):
+    PENDING = "pending"
+    RUNNING = "running"
+    DONE = "done"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+    RETRYING = "retrying"
 
-@dataclass
-class TaskResult:
-    task_id: str
-    status: TaskStatus
-    result: str | None
-    error: str | None
-    exit_code: int | None
-    session_id: str | None
-    usage: TokenUsage | None
-    duration_seconds: float | None
-    metadata: dict
+
+class Priority(int, Enum):
+    HIGH = 1
+    NORMAL = 5
+    LOW = 9
 ```
 
-#### 3.2.3 Broker (broker/) — 큐 + 결과 저장
+#### 3.2.6 Broker
 
 **AbstractBroker 인터페이스:**
 
 ```python
 class AbstractBroker(ABC):
-    # 큐 관리
-    async def enqueue(self, task: Task) -> None: ...
-    async def dequeue(self, timeout: float = 0) -> Task | None: ...
-    async def acknowledge(self, task_id: str) -> None: ...
-    
+    # 큐
+    async def enqueue(self, task: Task, *, delay: int | None = None) -> None: ...
+    async def dequeue(self, queue_names: list[str], timeout: float = 1.0) -> Task | None: ...
+    async def ack(self, queue_name: str, task_id: str) -> None: ...
+    async def nack(self, queue_name: str, task_id: str) -> None: ...
+    async def requeue(self, queue_name: str, task_ids: list[str]) -> None: ...
+
     # 상태/결과
     async def get_task(self, task_id: str) -> Task | None: ...
     async def update_task(self, task: Task) -> None: ...
-    
+
     # 스트리밍
     async def publish_chunk(self, task_id: str, chunk: StreamEvent) -> None: ...
     async def subscribe_chunks(self, task_id: str) -> AsyncIterator[StreamEvent]: ...
-    
+
+    # DLQ
+    async def list_dlq(self, queue_name: str, limit: int = 100) -> list[Task]: ...
+    async def retry_from_dlq(self, queue_name: str, task_id: str) -> None: ...
+    async def purge_dlq(self, queue_name: str) -> None: ...
+
+    # 워커 관리
+    async def register_worker(self, worker_id: str, queues: list[str]) -> None: ...
+    async def heartbeat(self, worker_id: str) -> None: ...
+    async def queue_size(self, queue_name: str) -> int: ...
+
+    # 비용
+    async def incr_cost(self, amount: float, worker_id: str | None = None) -> None: ...
+    async def get_total_cost(self) -> float: ...
+    async def get_worker_cost(self, worker_id: str) -> float: ...
+
+    # 미들웨어 시그널
+    async def emit_before(self, signal: str, *args, **kwargs) -> None: ...
+    async def emit_after(self, signal: str, *args, **kwargs) -> None: ...
+
     # 라이프사이클
     async def connect(self) -> None: ...
     async def close(self) -> None: ...
-    async def flush(self) -> None: ...    # 테스트용 전체 삭제
 ```
 
-**InMemoryBroker** — 개발/테스트용, asyncio.PriorityQueue + dict 기반. 단일 프로세스 한정.
-
-**RedisBroker** — 운영용.
-
-| 기능 | Redis 구조 |
-|---|---|
-| 큐 | Sorted Set (`{prefix}:queue`) — score = priority + timestamp |
-| 작업 상태/결과 | Hash (`{prefix}:task:{id}`) + TTL |
-| 스트리밍 | Redis Streams (`{prefix}:stream:{id}`) |
-| 배치 | Set (`{prefix}:batch:{id}`) — 소속 task_id 목록 |
-| 딜레이 큐 | Sorted Set (`{prefix}:delayed`) — score = delay_until timestamp |
-| 락 | `{prefix}:lock:{id}` — 중복 실행 방지 |
+**RedisBroker — 유일한 구현:**
 
 ```python
 class RedisBroker(AbstractBroker):
     def __init__(
         self,
         url: str = "redis://localhost:6379",
-        password: str | None = None,
-        key_prefix: str = "open_kknaks",  # 네임스페이스 분리
-        result_ttl: int = 3600,            # 결과 보관 시간 (초)
-        stream_maxlen: int = 1000,         # 스트림 최대 길이
+        namespace: str = "open_kknaks",
+        result_ttl: int = 3600,
+        stream_maxlen: int = 1000,
     ): ...
 ```
 
-#### 3.2.4 Worker (worker.py) — 큐 소비 + CLI 실행
+**Redis 데이터 구조:**
 
-```python
-class Worker:
-    def __init__(
-        self,
-        broker: AbstractBroker,
-        executor: ClaudeCodeExecutor,
-        concurrency: int = 4,             # 동시 실행 수
-        poll_interval: float = 0.1,       # 큐 폴링 간격 (초)
-        middlewares: list[Middleware] = [],
-    ): ...
+```
+{ns} = namespace (기본: "open_kknaks")
 
-    async def start(self) -> None: ...     # 워커 루프 시작
-    async def stop(self) -> None: ...      # 그레이스풀 종료
-    async def _process_task(self, task: Task) -> None: ...
+# 큐
+{ns}:queue:{queue_name}            # Sorted Set (score = priority * 1e12 + timestamp)
+{ns}:queue:{queue_name}.delayed    # Sorted Set (score = delay_until timestamp)
+{ns}:queue:{queue_name}.active     # Set (현재 처리 중인 task_id)
+{ns}:queue:{queue_name}.dlq        # List (Dead Letter Queue)
+
+# 작업
+{ns}:task:{task_id}                # Hash → JSON
+
+# 스트리밍
+{ns}:stream:{task_id}              # Redis Stream (청크 이벤트)
+
+# 배치
+{ns}:batch:{batch_id}              # Set (소속 task_id 목록)
+{ns}:batch:{batch_id}:meta         # Hash (mode, total, done, failed)
+
+# 워커
+{ns}:workers                       # Hash (worker_id → JSON{queues, last_heartbeat})
+
+# 비용
+{ns}:cost:total                    # Float — 전체 누적 비용 (INCRBYFLOAT)
+{ns}:cost:worker:{worker_id}       # Float — 워커별 누적 비용
+{ns}:cost:daily:{YYYY-MM-DD}       # Float — 일별 비용
 ```
 
-- `concurrency`개의 asyncio Task를 동시 실행
-- 각 task를 dequeue → middleware(before_process) → executor 실행 → middleware(after_process) → 결과 저장
-- 실패 시: retry_count < max_retries면 상태를 RETRYING으로 변경 후 재큐잉
-- 취소 시: 실행 중인 subprocess에 SIGTERM 전송, 5초 후 SIGKILL
+#### 3.2.7 Middleware
 
-#### 3.2.5 ClaudeCodeExecutor (runner/claude.py) — CLI 실행 엔진
-
-실제 Claude Code CLI를 subprocess로 호출하는 핵심 컴포넌트.
+시그널 6개. 기본 제공 6개. 시그널 메서드에 **broker 인자를 직접 전달**한다.
+미들웨어 생성자는 설정값만 받음 (broker를 생성자에서 받지 않음).
 
 ```python
-class ClaudeCodeExecutor:
-    def __init__(
-        self,
-        claude_bin: str | None = None,    # None이면 shutil.which("claude")
-        default_work_dir: str = ".",
-        default_model: str | None = None,
-        default_allowed_tools: list[str] | None = None,
-        default_append_system_prompt: str | None = None,
-        default_max_turns: int | None = None,
-        default_permission_mode: str = "default",
-        default_bare: bool = True,
-    ): ...
-
-    async def execute(
-        self,
-        task: Task,
-        on_chunk: Callable[[StreamEvent], Awaitable[None]] | None = None,
-    ) -> TaskResult: ...
+class Middleware:
+    async def before_enqueue(self, broker, task: Task) -> Task | None: ...
+    async def after_enqueue(self, broker, task: Task) -> None: ...
+    async def before_process(self, broker, task: Task) -> Task | None: ...
+    async def after_process(self, broker, task: Task, *, result=None, exception=None) -> None: ...
+    async def before_worker_boot(self, broker, worker) -> None: ...
+    async def after_worker_shutdown(self, broker, worker) -> None: ...
 ```
 
-**CLI 빌드 로직:**
+**체인 동작 규칙:**
 
-Task의 필드를 Claude Code CLI 플래그로 변환한다.
+| 단계 | 실행 순서 | 중단 조건 |
+|---|---|---|
+| `before_*` | 등록 순서 (sequential) | 예외 발생 시 break — 이후 MW의 before 호출 안 함 |
+| `after_*` | **역순** (스택) | 중단 없음 — 예외 시에도 **모든** MW의 after 호출 보장 |
 
-```python
-def _build_command(self, task: Task) -> list[str]:
-    cmd = [self.claude_bin, "-p", task.prompt]
-    cmd += ["--output-format", "stream-json"]
-    cmd += ["--verbose"]
-    
-    if task.bare or (task.bare is None and self.default_bare):
-        cmd.append("--bare")
-    if task.model or self.default_model:
-        cmd += ["--model", task.model or self.default_model]
-    if task.allowed_tools or self.default_allowed_tools:
-        tools = task.allowed_tools or self.default_allowed_tools
-        cmd += ["--allowedTools"] + tools
-    if task.append_system_prompt or self.default_append_system_prompt:
-        cmd += ["--append-system-prompt",
-                task.append_system_prompt or self.default_append_system_prompt]
-    if task.max_turns or self.default_max_turns:
-        cmd += ["--max-turns", str(task.max_turns or self.default_max_turns)]
-    if task.permission_mode == "bypassPermissions":
-        cmd.append("--dangerously-skip-permissions")
-    if task.session_id:
-        cmd += ["--resume", task.session_id]
-    
-    return cmd
+- `RetriesMiddleware`는 `after_process`에서 재시도 판단 후 `broker.enqueue(delay=...)` 직접 호출
+- 작업 상태 변경은 `StreamEvent` 타입 확장 없이 `Task.status`로 관장 (StreamEvent 타입은 text/cost/retry 유지)
+
+| 미들웨어 | 설명 | 기본 활성화 |
+|---|---|---|
+| `LoggingMiddleware` | 작업 시작/완료/실패 structlog 로깅 | O |
+| `RetriesMiddleware` | 지수 백오프 재시도 (min 5s → max 300s) + DLQ 이동 | O |
+| `TimeoutMiddleware` | PTY 프로세스 SIGHUP → SIGTERM → SIGKILL | O |
+| `CostMiddleware` | 3단계 비용 제어 (Task/Worker/전체) + 알림 | O |
+| `RateLimitMiddleware` | 분당 최대 요청 수 제한 | 옵션 |
+| `CallbackMiddleware` | 완료/실패 시 webhook 또는 함수 콜백 | 옵션 |
+
+**CostMiddleware 3단계 비용 제어:**
+
+```
+1. Worker 단위: worker_budget_usd → 워커 누적 사용량 한도
+2. Worker 단위: worker_budget_usd → 워커 누적 비용 한도
+3. 전체 단위: global_budget_usd → namespace 전체 비용 한도 (Redis에 저장)
 ```
 
-**실행 방식:**
+#### 3.2.8 MCP 서버
 
-1. `asyncio.create_subprocess_exec()` 로 Claude Code CLI 실행
-2. `--output-format stream-json` 출력을 줄 단위로 파싱
-3. 각 JSON 이벤트를 `StreamEvent`로 변환하여 `on_chunk` 콜백 호출
-4. context가 있으면 stdin으로 파이프 (`echo context | claude -p "prompt"`)
-5. 프로세스 종료 시 exit_code + 최종 result 추출
-6. timeout 초과 시 SIGTERM → 5초 대기 → SIGKILL
-
-**StreamEvent 타입:**
-
-```python
-@dataclass
-class StreamEvent:
-    task_id: str
-    type: str               # "text_delta" | "tool_use" | "tool_result" | "result" | "error" | "system"
-    data: dict              # 원본 stream-json 이벤트
-    text: str | None = None # text_delta일 때 텍스트 조각
-    timestamp: datetime = field(default_factory=datetime.utcnow)
-```
-
-#### 3.2.6 Middleware (middleware.py) — 작업 전/후 훅
-
-Dramatiq의 미들웨어 패턴을 그대로 차용.
-
-```python
-class Middleware(ABC):
-    async def before_enqueue(self, task: Task) -> Task | None:
-        """큐에 넣기 전. None 반환 시 작업 취소."""
-        return task
-
-    async def after_enqueue(self, task: Task) -> None:
-        """큐에 넣은 후."""
-        pass
-
-    async def before_process(self, task: Task) -> Task | None:
-        """실행 전. None 반환 시 스킵."""
-        return task
-
-    async def after_process(self, task: Task, result: TaskResult) -> None:
-        """실행 완료 후."""
-        pass
-
-    async def after_skip(self, task: Task) -> None:
-        """스킵된 작업 후."""
-        pass
-
-    async def on_failure(self, task: Task, error: Exception) -> None:
-        """실패 시."""
-        pass
-```
-
-**기본 제공 미들웨어:**
-
-| 미들웨어 | 설명 |
-|---|---|
-| `LoggingMiddleware` | 작업 시작/완료/실패 로깅 (structlog 기반) |
-| `RetryMiddleware` | 실패 시 자동 재시도 (max_retries, 지수 백오프) |
-| `TimeoutMiddleware` | 작업별 타임아웃 관리 |
-| `CostTrackingMiddleware` | stream-json에서 토큰 사용량 파싱 + 비용 계산 |
-| `RateLimitMiddleware` | 분당 최대 요청 수 제한 (API rate limit 방어) |
-| `CallbackMiddleware` | 완료/실패 시 유저 정의 콜백 실행 (webhook, Slack 등) |
-
-### 3.3 MCP 서버 (mcp/)
-
-라이브러리 자체를 MCP 서버로 노출한다. Claude Desktop 등 MCP 클라이언트에서 Claude Code를 원격 태스크 큐로 사용할 수 있게 한다.
+라이브러리 자체를 MCP 서버로 노출한다.
 
 ```
 MCP Client (Claude Desktop, Cursor, etc.)
@@ -431,92 +591,105 @@ MCP Client (Claude Desktop, Cursor, etc.)
 open_kknaks MCP Server
     │
     ▼
-ClaudeRunner → Worker → Claude Code CLI
+ClaudeClient → RedisBroker → ClaudeWorker → PTY Executor
 ```
 
 **노출 MCP Tool:**
 
 | Tool | 파라미터 | 설명 |
 |---|---|---|
-| `submit_task` | prompt, context?, priority?, model?, allowed_tools?, timeout? | 작업 등록 → task_id |
+| `submit_task` | prompt, context?, queue?, priority?, model?, timeout? | 작업 등록 → task_id |
 | `get_status` | task_id | 상태 조회 |
-| `get_result` | task_id, wait? | 결과 조회 (wait=true면 완료 대기) |
+| `get_result` | task_id, wait? | 결과 조회 |
 | `cancel_task` | task_id | 취소 |
-| `stream_task` | task_id | 스트리밍 (SSE 지원 시) |
-| `submit_batch` | tasks[], mode? | 배치 등록 → batch_id |
-| `get_batch_status` | batch_id | 배치 상태 |
-| `get_batch_result` | batch_id, wait? | 배치 결과 |
+| `stream_task` | task_id | 스트리밍 |
+| `submit_batch` | tasks[], mode? | 배치 등록 |
 | `list_tasks` | status?, limit? | 작업 목록 조회 |
 
-**MCP 서버 실행:**
+---
 
-```python
-from open_kknaks.mcp import MCPServer
+## 4. CLI
 
-server = MCPServer(
-    runner=ClaudeRunner(work_dir="/my/project"),
-    transport="stdio",    # "stdio" (기본) 또는 "sse"
-)
+```bash
+# === 워커 실행 ===
+open-kknaks worker \
+    --broker redis://localhost:6379 \
+    --namespace myapp \
+    --queues error-analysis,general \
+    --work-dir /my/backend \
+    --model sonnet \
+    --concurrency 4
 
-# stdio 모드 (Claude Desktop 등)
-server.run()
+# === 큐 관리 ===
+open-kknaks queue list
+open-kknaks queue size error-analysis
+open-kknaks queue purge error-analysis
 
-# SSE 모드 (HTTP 서버)
-server.run(host="0.0.0.0", port=3000)
-```
+# === DLQ 관리 ===
+open-kknaks dlq list error-analysis
+open-kknaks dlq retry error-analysis --task-id abc123
+open-kknaks dlq retry error-analysis --all
+open-kknaks dlq purge error-analysis
 
-**MCP 설정 파일 (claude_desktop_config.json 예시):**
+# === 작업 조회 ===
+open-kknaks task status abc123
+open-kknaks task result abc123
+open-kknaks task cancel abc123
 
-```json
-{
-  "mcpServers": {
-    "open_kknaks": {
-      "command": "python",
-      "args": ["-m", "open_kknaks.mcp", "--work-dir", "/my/project"],
-      "env": {
-        "REDIS_URL": "redis://localhost:6379"
-      }
-    }
-  }
-}
+# === 워커 상태 ===
+open-kknaks worker list
 ```
 
 ---
 
-## 4. 패키지 구조
+## 5. 패키지 구조
 
 ```
 open_kknaks/
-├── __init__.py              # ClaudeRunner, Task, TaskStatus 등 public export
-├── client.py                # ClaudeRunner (유저 메인 진입점)
+├── __init__.py              # ClaudeClient, Task, ClaudeConfig export
+├── client.py                # ClaudeClient (프로듀서)
+├── config.py                # ClaudeConfig (Claude Code CLI 설정)
 ├── task.py                  # Task, TaskStatus, Priority, TaskResult, TokenUsage, StreamEvent
 ├── batch.py                 # BatchRunner, BatchStatus
-├── worker.py                # Worker (큐 소비 + executor 호출)
-├── runner/
-│   ├── __init__.py
-│   ├── base.py              # AbstractExecutor 인터페이스
-│   └── claude.py            # ClaudeCodeExecutor (CLI 실행)
 ├── broker/
 │   ├── __init__.py          # AbstractBroker export
-│   ├── base.py              # AbstractBroker 인터페이스
-│   ├── memory.py            # InMemoryBroker
-│   └── redis.py             # RedisBroker
+│   ├── base.py              # AbstractBroker (인터페이스)
+│   ├── redis.py             # RedisBroker (유일한 구현)
+│   └── lua/                 # Redis Lua 스크립트
+│       ├── enqueue.lua
+│       ├── dequeue.lua
+│       ├── ack.lua
+│       ├── nack.lua
+│       ├── requeue.lua
+│       └── maintenance.lua
+├── worker/
+│   ├── __init__.py
+│   ├── worker.py            # ClaudeWorker
+│   ├── executor.py          # ClaudeCodeExecutor (PTY 기반 CLI 실행)
+│   ├── pty_process.py       # PTYProcess (단일 프로세스 래퍼 + 3단계 종료)
+│   └── line_buffer.py       # LineBuffer (바이트 스트림 → 줄 단위 조립)
 ├── middleware/
 │   ├── __init__.py
-│   ├── base.py              # Middleware ABC
+│   ├── base.py              # Middleware base class
 │   ├── logging.py           # LoggingMiddleware
-│   ├── retry.py             # RetryMiddleware
+│   ├── retries.py           # RetriesMiddleware
 │   ├── timeout.py           # TimeoutMiddleware
-│   ├── cost.py              # CostTrackingMiddleware
+│   ├── cost.py              # CostMiddleware
 │   ├── rate_limit.py        # RateLimitMiddleware
 │   └── callback.py          # CallbackMiddleware
 ├── mcp/
 │   ├── __init__.py
 │   ├── server.py            # MCPServer
-│   └── __main__.py          # python -m open_kknaks.mcp 실행 지원
-├── exceptions.py            # 커스텀 예외 (TaskTimeout, ClaudeNotFound, BrokerError 등)
-├── _utils.py                # 유틸리티 (claude 바이너리 탐색, 로깅 설정 등)
-└── py.typed                 # PEP 561 타입 힌트 마커
+│   └── __main__.py          # python -m open_kknaks.mcp
+├── cli/
+│   ├── __init__.py
+│   ├── main.py              # CLI 진입점 (typer)
+│   ├── worker_cmd.py        # worker 서브커맨드
+│   ├── queue_cmd.py         # queue 서브커맨드
+│   ├── dlq_cmd.py           # dlq 서브커맨드
+│   └── task_cmd.py          # task 서브커맨드
+├── exceptions.py            # 예외 계층
+└── py.typed
 ```
 
 **프로젝트 루트:**
@@ -527,55 +700,57 @@ tests/
 ├── conftest.py
 ├── test_client.py
 ├── test_worker.py
-├── test_executor.py
-├── test_broker_memory.py
+├── test_executor.py         # PTY Executor 테스트
+├── test_pty_process.py      # PTYProcess 생명주기 테스트
+├── test_line_buffer.py      # LineBuffer 테스트
 ├── test_broker_redis.py
 ├── test_middleware.py
 ├── test_batch.py
 ├── test_mcp.py
 └── test_integration.py
 docs/
-├── PLAN.md                  # 기획 초안 (원본)
+├── PLAN.md
 ├── PRD.md                   # 이 문서
-└── EXAMPLES.md              # 유즈케이스 예시 모음
+├── ARCHITECTURE_V2.md       # 상세 설계
+├── CLAUDE_CODE_ANALYSIS.md  # Claude Code CLI 분석
+└── DRAMATIQ_ANALYSIS.md     # Dramatiq 분석
 pyproject.toml
 README.md
 LICENSE                      # MIT
 CHANGELOG.md
 .github/
 └── workflows/
-    ├── test.yml             # pytest + coverage
-    └── publish.yml          # PyPI 배포
+    ├── test.yml
+    └── publish.yml
 ```
 
 ---
 
-## 5. 의존성
+## 6. 의존성
 
-### 5.1 필수 의존성
+### 6.1 필수 의존성
 
 | 패키지 | 버전 | 용도 |
 |---|---|---|
-| Python | ≥ 3.10 | async/await, match-case, `X | Y` 유니온 타입 |
-| `pydantic` | ≥ 2.0 | Task/Config 데이터 검증 + 직렬화 |
+| Python | >= 3.10 | async/await, `X \| Y` 유니온 타입 |
+| `pydantic` | >= 2.0 | Task/Config 데이터 검증 + 직렬화 |
 
-### 5.2 선택적 의존성 (extras)
+### 6.2 선택적 의존성 (extras)
 
 | extra | 패키지 | 용도 |
 |---|---|---|
-| `redis` | `redis[asyncio] ≥ 5.0` | RedisBroker |
-| `mcp` | `mcp ≥ 1.0` | MCP 서버 |
-
-**설치 예시:**
+| `redis` | `redis[asyncio] >= 5.0` | RedisBroker |
+| `mcp` | `mcp >= 1.0` | MCP 서버 |
+| `cli` | `typer >= 0.12` | CLI 도구 |
 
 ```bash
-pip install open-kknaks                  # InMemoryBroker만 사용
-pip install open-kknaks[redis]           # + RedisBroker
-pip install open-kknaks[mcp]             # + MCP 서버
-pip install open-kknaks[redis,mcp]       # 전부
+pip install open-kknaks[redis]           # 기본 사용
+pip install open-kknaks[redis,mcp]       # + MCP 서버
+pip install open-kknaks[redis,cli]       # + CLI 도구
+pip install open-kknaks[redis,mcp,cli]   # 전부
 ```
 
-### 5.3 개발 의존성
+### 6.3 개발 의존성
 
 | 패키지 | 용도 |
 |---|---|
@@ -586,344 +761,325 @@ pip install open-kknaks[redis,mcp]       # 전부
 
 ---
 
-## 6. 전제 조건
+## 7. 전제 조건
 
 | 항목 | 설명 |
 |---|---|
-| Claude Code CLI | 사용자 환경에 설치 + 로그인 완료 (`claude` 바이너리 PATH에 존재) |
-| Python ≥ 3.10 | asyncio 기반 |
-| Redis (선택) | RedisBroker 사용 시만 필요. 유저가 직접 설치/실행 |
+| Claude Code CLI | 사용자 환경에 설치 + `claude login` 완료 (OAuth 인증) |
+| Claude 구독 | Pro 또는 Max 플랜 (Claude Code 사용량 포함) |
+| Python >= 3.10 | asyncio 기반 |
+| Linux / macOS | PTY 필수 — **Windows 미지원** |
+| Redis | RedisBroker 사용 시 필요 |
 
-**Claude Code CLI 검증 로직:**
-
-```python
-# ClaudeRunner 초기화 시
-1. claude_bin이 명시되면 해당 경로 확인
-2. 없으면 shutil.which("claude") 로 탐색
-3. 발견 못하면 ClaudeNotFoundError 발생
-4. `claude auth status` 실행하여 로그인 상태 확인 (경고 레벨)
-```
+> **인증:** OAuth(`claude login`) 전용. API Key(`ANTHROPIC_API_KEY`)는 사용하지 않음.
+> 이미 로컬에서 Claude Code를 쓰고 있다면 추가 로그인 없이 바로 사용 가능.
 
 ---
 
-## 7. API 상세
+## 8. API 상세
 
-### 7.1 기본 사용법
+### 8.1 기본 사용법
 
 ```python
 import asyncio
-from open_kknaks import ClaudeRunner
+from open_kknaks import ClaudeClient
+from open_kknaks.broker import RedisBroker
 
 async def main():
-    async with ClaudeRunner(work_dir="/my/project") as runner:
-        # 단일 작업
-        task_id = await runner.submit("이 코드의 버그를 찾아줘")
-        result = await runner.result(task_id)
-        print(result.result)
+    client = ClaudeClient(
+        broker=RedisBroker(url="redis://localhost:6379"),
+    )
+
+    task_id = await client.submit("이 코드의 버그를 찾아줘")
+    result = await client.result(task_id)
+    print(result.result)
 
 asyncio.run(main())
 ```
 
-### 7.2 스트리밍
+### 8.2 스트리밍
 
 ```python
-async with ClaudeRunner(work_dir="/my/project") as runner:
-    task_id = await runner.submit("에러 로그 분석해줘", context=error_log)
-    
-    async for event in runner.stream(task_id):
-        if event.type == "text_delta":
-            print(event.text, end="", flush=True)
-        elif event.type == "result":
-            print(f"\n완료! 토큰: {event.data.get('usage', {})}")
+task_id = await client.submit("에러 로그 분석해줘", context=error_log)
+
+async for event in client.stream(task_id):
+    if event.text:
+        print(event.text, end="", flush=True)
 ```
 
-### 7.3 배치 작업
+### 8.3 멀티 큐 + 워커 분리
 
 ```python
-async with ClaudeRunner(work_dir="/my/project", concurrency=3) as runner:
-    batch_id = await runner.batch_submit(
-        tasks=[
-            {"prompt": "이슈 #101 분석", "context": issue1_text},
-            {"prompt": "이슈 #102 분석", "context": issue2_text},
-            {"prompt": "이슈 #103 분석", "context": issue3_text},
-        ],
-        mode="parallel",  # "parallel" (기본) 또는 "sequential"
-    )
-    
-    results = await runner.batch_wait(batch_id, timeout=1800)
-    for r in results:
-        print(f"[{r.task_id}] {r.status.value}: {r.result[:100]}")
+# === producer.py ===
+client = ClaudeClient(broker=RedisBroker(url="redis://myserver:6379"))
+await client.submit("PR 리뷰", queue="pr-review", context=pr_diff)
+await client.submit("에러 분석", queue="error-analysis", context=error_log)
+
+# === worker_review.py ===
+worker = ClaudeWorker(
+    broker=RedisBroker(url="redis://myserver:6379"),
+    queues=["pr-review"],
+    claude=ClaudeConfig(work_dir="/my/frontend", model="opus"),
+    concurrency=2,
+)
+await worker.run()
+
+# === worker_error.py ===
+worker = ClaudeWorker(
+    broker=RedisBroker(url="redis://myserver:6379"),
+    queues=["error-analysis"],
+    claude=ClaudeConfig(work_dir="/my/backend", model="sonnet"),
+    concurrency=4,
+)
+await worker.run()
 ```
 
-### 7.4 우선순위 + 지연 실행
+### 8.4 배치 작업
 
 ```python
-# 긴급 작업
-await runner.submit("프로덕션 에러!", context=crash_log, priority="high")
+batch_id = await client.batch_submit(
+    tasks=[
+        {"prompt": "이슈 #101 분석", "context": ctx1},
+        {"prompt": "이슈 #102 분석", "context": ctx2},
+        {"prompt": "이슈 #103 분석", "context": ctx3},
+    ],
+    queue="error-analysis",
+    mode="parallel",
+)
 
-# 30초 후 실행
-await runner.submit("비긴급 리팩토링 제안", delay_seconds=30, priority="low")
+results = await client.batch_wait(batch_id, timeout=1800)
 ```
 
-### 7.5 세션 이어가기
+### 8.5 우선순위 + 지연 실행
 
 ```python
-# 첫 번째 작업
-result1 = await runner.result(
-    await runner.submit("이 프로젝트 구조를 분석해줘")
+await client.submit("프로덕션 에러!", context=crash_log, priority="high")
+await client.submit("비긴급 리팩토링", delay_seconds=30, priority="low")
+```
+
+### 8.6 세션 이어가기
+
+```python
+result1 = await client.result(
+    await client.submit("프로젝트 구조 분석해줘")
 )
 session = result1.session_id
 
-# 같은 세션에서 이어서 질문
-result2 = await runner.result(
-    await runner.submit("아까 분석한 내용 기반으로 리팩토링 해줘", session_id=session)
+result2 = await client.result(
+    await client.submit("아까 분석 기반으로 리팩토링", session_id=session)
 )
 ```
 
-### 7.6 커스텀 미들웨어
+### 8.7 커스텀 미들웨어
 
 ```python
-from open_kknaks.middleware import Middleware, CallbackMiddleware
+from open_kknaks.middleware import Middleware
 
 class SlackNotifyMiddleware(Middleware):
-    async def after_process(self, task, result):
-        if result.status == TaskStatus.DONE:
-            await send_slack(f"✅ 작업 완료: {task.prompt[:50]}")
+    async def after_process(self, broker, task, *, result=None, exception=None):
+        if exception is None:
+            await send_slack(f"작업 완료: {task.prompt[:50]}")
+        else:
+            await send_slack(f"작업 실패: {task.prompt[:50]} - {exception}")
 
-    async def on_failure(self, task, error):
-        await send_slack(f"❌ 작업 실패: {task.prompt[:50]} - {error}")
-
-runner = ClaudeRunner(
-    work_dir="/my/project",
-    middlewares=[
-        SlackNotifyMiddleware(),
-        CallbackMiddleware(on_done=my_webhook),
-    ],
+worker = ClaudeWorker(
+    broker=broker,
+    queues=["general"],
+    claude=ClaudeConfig(work_dir="/my/project"),
+    middlewares=[SlackNotifyMiddleware()],
 )
 ```
 
-### 7.7 RedisBroker 멀티 프로세스
-
-```python
-# === producer.py (작업 등록만) ===
-from open_kknaks import ClaudeRunner
-from open_kknaks.broker import RedisBroker
-
-broker = RedisBroker(url="redis://myserver:6379", key_prefix="myapp")
-runner = ClaudeRunner(work_dir="/my/project", broker=broker)
-
-# 워커 시작하지 않고 작업만 등록
-task_id = await runner.submit("PR 리뷰해줘", context=pr_diff)
-
-# === worker.py (워커만 실행) ===
-from open_kknaks import ClaudeRunner
-from open_kknaks.broker import RedisBroker
-
-broker = RedisBroker(url="redis://myserver:6379", key_prefix="myapp")
-runner = ClaudeRunner(work_dir="/my/project", broker=broker, concurrency=2)
-
-await runner.start()   # 워커 루프 시작 (블로킹)
-```
-
-### 7.8 MCP 서버
+### 8.8 MCP 서버
 
 ```python
 from open_kknaks.mcp import MCPServer
-from open_kknaks import ClaudeRunner
 
 server = MCPServer(
-    runner=ClaudeRunner(work_dir="/my/project"),
+    broker=RedisBroker(url="redis://localhost:6379"),
     transport="stdio",
 )
 server.run()
 ```
 
+```json
+{
+  "mcpServers": {
+    "open_kknaks": {
+      "command": "python",
+      "args": ["-m", "open_kknaks.mcp", "--broker", "redis://localhost:6379"]
+    }
+  }
+}
+```
+
 ---
 
-## 8. 에러 처리
+## 9. 에러 처리
 
-### 8.1 커스텀 예외 계층
+### 9.1 예외 계층
 
 ```
 OpenKnaksError (base)
 ├── ClaudeNotFoundError          # claude 바이너리 없음
-├── ClaudeAuthError              # 로그인 안 됨
+├── ClaudeAuthError              # 로그인 안 됨 (API 401)
+├── BillingError                 # API 결제/한도 문제 (API 402) — 워커 즉시 중단
 ├── TaskError
 │   ├── TaskNotFoundError        # task_id 없음
-│   ├── TaskTimeoutError         # 타임아웃 초과
+│   ├── TaskTimeoutError         # 전체 타임아웃 초과
 │   ├── TaskCancelledError       # 취소됨
-│   └── TaskFailedError          # CLI 비정상 종료 (exit_code ≠ 0)
+│   ├── TaskFailedError          # CLI 비정상 종료
+│   └── IdleTimeoutError         # PTY 무응답 (행 감지)
 ├── BatchError
 │   ├── BatchNotFoundError
-│   └── BatchPartialFailureError # 배치 내 일부 실패
+│   └── BatchPartialFailureError
 ├── BrokerError
 │   ├── BrokerConnectionError    # Redis 연결 실패
-│   └── BrokerTimeoutError       # 브로커 응답 타임아웃
-└── ConfigError                  # 설정 오류
+│   └── BrokerTimeoutError
+├── PTYError                     # PTY 생성/fork 실패
+└── ConfigError
 ```
 
-### 8.2 재시도 정책
+**API 에러 → 예외 매핑:**
+
+| stream-json `error` | HTTP 상태 | 예외 | 재시도 | 대응 |
+|---|---|---|---|---|
+| `rate_limit` | 429 | (예외 없음) | CLI 자동 재시도 | RateLimitMiddleware 감속 |
+| `billing_error` | 402 | `BillingError` | 재시도 안 함 | 워커 중단 + 알림 |
+| `authentication_failed` | 401 | `ClaudeAuthError` | 재시도 안 함 | 워커 중단 + 알림 |
+| `server_error` | 500/529 | (예외 없음) | CLI 자동 재시도 | 로그 기록 |
+| `max_output_tokens` | — | (예외 없음) | 해당 없음 | 로그 기록 (제어 불가) |
+
+### 9.2 재시도 정책
 
 ```python
-# Task별 설정
-await runner.submit(
-    "불안정한 작업",
-    max_retries=3,         # 최대 3번 재시도
-    timeout=300,           # 5분 타임아웃
-)
-
-# RetryMiddleware 기본 동작
-# - 지수 백오프: 2^retry_count 초 (2s → 4s → 8s)
-# - 최대 대기: 60초
-# - 재시도 조건: exit_code ≠ 0 and retry_count < max_retries
+# RetriesMiddleware 기본 동작:
+# - 지수 백오프: min_backoff * (backoff_factor ^ retry_count)
+# - 범위: 5초 → 10초 → 20초 → ... → 최대 300초
 # - 재시도 제외: TaskCancelledError, ClaudeAuthError
+# - max_retries 초과 시 → DLQ 이동
 ```
 
 ---
 
-## 9. 유즈케이스
+## 10. 유즈케이스
 
-### 9.1 서버 에러 → Claude Code 분석 → Slack 알림
+### 10.1 서버 에러 → Claude Code 분석 → Slack 알림
 
 ```python
-from open_kknaks import ClaudeRunner
-from open_kknaks.middleware import CallbackMiddleware
+from open_kknaks import ClaudeClient
+from open_kknaks.broker import RedisBroker
 
-async def on_done(task, result):
-    await slack_webhook.send({
-        "text": f"🔍 에러 분석 완료\n```{result.result[:1000]}```"
-    })
+client = ClaudeClient(broker=RedisBroker())
 
-runner = ClaudeRunner(
-    work_dir="/my/server/repo",
-    append_system_prompt="You are a backend error analyst. Be concise.",
-    middlewares=[CallbackMiddleware(on_done=on_done)],
-)
-
-# FastAPI 에러 핸들러에서
 @app.exception_handler(Exception)
 async def handle_error(request, exc):
-    await runner.submit(
+    await client.submit(
         "이 에러를 분석하고 수정 방안을 제시해줘",
         context=f"Error: {exc}\nTraceback: {traceback.format_exc()}",
+        queue="error-analysis",
         priority="high",
     )
     return JSONResponse(status_code=500, content={"error": "Internal Server Error"})
 ```
 
-### 9.2 Jira 이슈 → 코드 분석 → 리포트
+### 10.2 CI 실패 → 원인 분석 → PR 코멘트
 
 ```python
-# Jira webhook 수신 시
-async def handle_jira_webhook(payload):
-    issue = payload["issue"]
-    task_id = await runner.submit(
-        f"Jira 이슈 분석: {issue['summary']}",
-        context=f"Description: {issue['description']}\nPriority: {issue['priority']}",
-        metadata={"jira_key": issue["key"]},
-    )
-    result = await runner.result(task_id, timeout=600)
-    await jira_client.add_comment(issue["key"], result.result)
+client = ClaudeClient(broker=RedisBroker())
+
+task_id = await client.submit(
+    "CI 테스트 실패 원인을 분석하고 수정 코드를 제안해줘",
+    context=test_output,
+    queue="ci-analysis",
+    model="sonnet",
+    allowed_tools=["Read", "Bash(git log *)", "Bash(git diff *)"],
+)
+result = await client.result(task_id)
+await github.create_pr_comment(pr_number, result.result)
 ```
 
-### 9.3 CI 실패 → 원인 분석 → PR 코멘트
+### 10.3 다중 에이전트 팀 (app_builder_local 패턴)
 
 ```python
-# GitHub Actions에서
-async def analyze_ci_failure(pr_number, test_output):
-    runner = ClaudeRunner(
-        work_dir="/workspace",
-        model="sonnet",
-        bare=True,
-        allowed_tools=["Read", "Bash(git log *)", "Bash(git diff *)"],
-    )
-    async with runner:
-        result = await runner.result(
-            await runner.submit(
-                "CI 테스트 실패 원인을 분석하고 수정 코드를 제안해줘",
-                context=test_output,
-            )
-        )
-        await github.create_pr_comment(pr_number, result.result)
-```
+# 기획 에이전트
+await client.submit(
+    "PRD 작성해줘",
+    context=idea_text,
+    queue="planner",
+    append_system_prompt="You are a planner agent.",
+)
 
-### 9.4 문서 비교 → 진행률 분석
-
-```python
-async def compare_docs(confluence_doc, github_commits):
-    task_id = await runner.submit(
-        "Confluence 기획 문서와 최근 커밋을 비교해서 구현 진행률을 분석해줘",
-        context=f"## 기획 문서\n{confluence_doc}\n\n## 최근 커밋\n{github_commits}",
-    )
-    async for event in runner.stream(task_id):
-        if event.type == "text_delta":
-            yield event.text  # SSE로 프론트에 전달
+# 백엔드/프론트엔드 병렬 리뷰
+batch_id = await client.batch_submit(
+    tasks=[
+        {"prompt": "백엔드 관점에서 리뷰", "queue": "backend-review"},
+        {"prompt": "프론트엔드 관점에서 리뷰", "queue": "frontend-review"},
+    ],
+    mode="parallel",
+)
 ```
 
 ---
 
-## 10. 테스트 전략
+## 11. 테스트 전략
 
-### 10.1 테스트 레이어
+### 11.1 테스트 레이어
 
 | 레이어 | 범위 | 방법 |
 |---|---|---|
-| **Unit** | Task, Broker, Middleware 각 클래스 | mock executor, InMemoryBroker |
-| **Integration** | Worker + Executor + Broker 연동 | InMemoryBroker + mock subprocess |
-| **E2E** | 실제 Claude Code CLI 호출 | `claude -p` 실행 (CI에서는 skip 마크) |
-| **Redis** | RedisBroker | testcontainers 또는 mock redis |
+| **Unit** | PTYProcess, LineBuffer, Task, Middleware | mock, 직접 PTY 테스트 |
+| **Unit** | Broker | mock redis (fakeredis) |
+| **Integration** | Worker + PTY Executor + Broker | fakeredis + mock subprocess |
+| **E2E** | 실제 Claude Code CLI 호출 | `claude -p` 실행 (CI에서는 skip) |
+| **Redis** | RedisBroker | testcontainers 또는 실제 Redis |
 
-### 10.2 mock 전략
+### 11.2 PTY 테스트
 
 ```python
-# Claude Code CLI를 mock하는 테스트용 executor
-class MockExecutor(AbstractExecutor):
-    def __init__(self, response="mock response", delay=0.1):
-        self.response = response
-        self.delay = delay
+# PTYProcess 생명주기 테스트
+async def test_pty_process_terminate():
+    """fork된 자식 + 손자 프로세스가 SIGHUP으로 모두 정리되는지 검증."""
+    master_fd, slave_fd = pty.openpty()
+    pid = os.fork()
+    if pid == 0:
+        os.setsid()
+        # 손자 프로세스 생성
+        os.fork()
+        time.sleep(60)
+        os._exit(0)
 
-    async def execute(self, task, on_chunk=None):
-        await asyncio.sleep(self.delay)
-        if on_chunk:
-            await on_chunk(StreamEvent(task_id=task.id, type="text_delta", text=self.response, data={}))
-        return TaskResult(
-            task_id=task.id,
-            status=TaskStatus.DONE,
-            result=self.response,
-            error=None,
-            exit_code=0,
-            session_id="mock-session",
-            usage=TokenUsage(input_tokens=100, output_tokens=50),
-            duration_seconds=self.delay,
-            metadata={},
-        )
+    os.close(slave_fd)
+    process = PTYProcess(pid=pid, master_fd=master_fd, pgid=pid, task_id="test")
+    exit_code = await process.terminate()
+
+    # 자식 + 손자 모두 종료 확인
+    assert not process.is_alive()
 ```
 
-### 10.3 CI 설정
+### 11.3 CI 설정
 
 ```yaml
-# .github/workflows/test.yml
 - pytest -x --timeout=60 -m "not e2e"     # 기본: e2e 제외
 - pytest -x --timeout=300 -m "e2e"         # 수동 트리거: e2e 포함
 ```
 
 ---
 
-## 11. PyPI 배포
+## 12. PyPI 배포
 
-### 11.1 패키지 메타데이터
+### 12.1 패키지 메타데이터
 
 ```toml
-# pyproject.toml
 [project]
 name = "open-kknaks"
 version = "0.1.0"
-description = "Task queue library for Claude Code CLI"
+description = "PTY-based task queue library for Claude Code CLI"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.10"
 authors = [{ name = "kknaks" }]
-keywords = ["claude", "claude-code", "task-queue", "ai", "automation"]
+keywords = ["claude", "claude-code", "task-queue", "pty", "ai", "automation"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
@@ -934,6 +1090,7 @@ classifiers = [
     "Programming Language :: Python :: 3.13",
     "Topic :: Software Development :: Libraries",
     "Framework :: AsyncIO",
+    "Operating System :: POSIX",
 ]
 
 dependencies = [
@@ -943,13 +1100,18 @@ dependencies = [
 [project.optional-dependencies]
 redis = ["redis[asyncio]>=5.0"]
 mcp = ["mcp>=1.0"]
+cli = ["typer>=0.12"]
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.24",
+    "fakeredis[aioredis]>=2.0",
     "ruff>=0.8",
     "mypy>=1.13",
     "coverage>=7.0",
 ]
+
+[project.scripts]
+open-kknaks = "open_kknaks.cli.main:app"
 
 [project.urls]
 Homepage = "https://github.com/kknaks/open_kknaks"
@@ -961,134 +1123,122 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 ```
 
-### 11.2 버전 전략
+### 12.2 버전 전략
 
-- **0.1.0** — MVP (InMemoryBroker + 단일/배치 작업 + 스트리밍)
-- **0.2.0** — RedisBroker + 미들웨어
+- **0.1.0** — MVP (PTY Executor + RedisBroker + 단일/배치 작업 + 스트리밍)
+- **0.2.0** — 미들웨어 6종 + CLI 도구
 - **0.3.0** — MCP 서버
-- **1.0.0** — API 안정화 + 전체 테스트 커버리지 ≥ 80%
+- **1.0.0** — API 안정화 + 커버리지 >= 80%
 
 ---
 
-## 12. 마일스톤
+## 13. 마일스톤
 
-### Sprint 1 — 코어 (1.5주)
+### Sprint 1 — PTY Executor + 코어 (1.5주)
 
 | 작업 | 설명 | 산출물 |
 |---|---|---|
 | S1-1 | 프로젝트 세팅 (pyproject.toml, ruff, mypy, CI) | 빌드/린트/테스트 통과 |
-| S1-2 | Task, TaskStatus, Priority, TaskResult 모델 | `task.py` |
-| S1-3 | AbstractBroker + InMemoryBroker | `broker/` |
-| S1-4 | ClaudeCodeExecutor (subprocess + stream-json 파싱) | `runner/claude.py` |
-| S1-5 | Worker (큐 소비 + executor 호출 + concurrency) | `worker.py` |
-| S1-6 | ClaudeRunner (client 조립 + submit/stream/result/cancel) | `client.py` |
-| S1-7 | Unit + Integration 테스트 | `tests/` |
+| S1-2 | Task, TaskStatus, Priority, TaskResult, TokenUsage 모델 | `task.py` |
+| S1-3 | ClaudeConfig 모델 | `config.py` |
+| S1-4 | LineBuffer (바이트 → 줄 단위 조립) | `worker/line_buffer.py` |
+| S1-5 | PTYProcess (fork + setsid + 3단계 종료) | `worker/pty_process.py` |
+| S1-6 | ClaudeCodeExecutor (PTY 기반 실행 + stream-json 파싱) | `worker/executor.py` |
+| S1-7 | AbstractBroker + RedisBroker | `broker/` |
+| S1-8 | ClaudeWorker (큐 소비 + PTY executor + concurrency) | `worker/worker.py` |
+| S1-9 | ClaudeClient (submit/stream/result/cancel) | `client.py` |
+| S1-10 | Unit + Integration 테스트 | `tests/` |
 
-**완료 기준:** `ClaudeRunner(work_dir=X)` → `submit()` → `stream()` / `result()` 동작 확인
+**완료 기준:** PTY로 Claude Code 스폰 → stream-json 파싱 → Redis 경유 결과 반환 동작 확인. PTYProcess 3단계 종료 + 고아 프로세스 정리 검증.
 
-### Sprint 2 — 배치 + 미들웨어 (1주)
-
-| 작업 | 설명 | 산출물 |
-|---|---|---|
-| S2-1 | BatchRunner (parallel / sequential) | `batch.py` |
-| S2-2 | Middleware ABC + 파이프라인 | `middleware/base.py` |
-| S2-3 | LoggingMiddleware, RetryMiddleware, TimeoutMiddleware | `middleware/` |
-| S2-4 | CostTrackingMiddleware (stream-json usage 파싱) | `middleware/cost.py` |
-| S2-5 | RateLimitMiddleware, CallbackMiddleware | `middleware/` |
-| S2-6 | 세션 이어가기 (--continue, --resume) | `runner/claude.py` 확장 |
-| S2-7 | 배치 + 미들웨어 테스트 | `tests/` |
-
-**완료 기준:** 배치 작업 + 미들웨어 체인 동작, 비용 추적 확인
-
-### Sprint 3 — RedisBroker (1주)
+### Sprint 2 — 미들웨어 + 배치 (1주)
 
 | 작업 | 설명 | 산출물 |
 |---|---|---|
-| S3-1 | RedisBroker 구현 (큐 + 상태 + 스트리밍) | `broker/redis.py` |
-| S3-2 | 딜레이 큐 (Sorted Set 기반) | `broker/redis.py` |
-| S3-3 | 멀티 프로세스 테스트 (producer/worker 분리) | `tests/test_broker_redis.py` |
-| S3-4 | key_prefix 네임스페이스 격리 검증 | 테스트 |
+| S2-1 | Middleware ABC + 파이프라인 (6개 시그널) | `middleware/base.py` |
+| S2-2 | LoggingMiddleware, RetriesMiddleware, TimeoutMiddleware | `middleware/` |
+| S2-3 | CostMiddleware (3단계 비용 제어) | `middleware/cost.py` |
+| S2-4 | RateLimitMiddleware, CallbackMiddleware | `middleware/` |
+| S2-5 | BatchRunner (parallel / sequential) | `batch.py` |
+| S2-6 | DLQ 관리 (nack → DLQ, retry, purge) | `broker/redis.py` |
+| S2-7 | Lua 스크립트 (enqueue/dequeue/ack/nack/requeue/maintenance) | `broker/lua/` |
+| S2-8 | 미들웨어 + 배치 테스트 | `tests/` |
 
-**완료 기준:** 별도 프로세스에서 producer/worker 분리 실행 확인
+**완료 기준:** 미들웨어 체인 동작, 3단계 비용 추적, DLQ 이동/재시도 확인.
 
-### Sprint 4 — MCP + 배포 (1주)
+### Sprint 3 — CLI + MCP + 배포 (1주)
 
 | 작업 | 설명 | 산출물 |
 |---|---|---|
-| S4-1 | MCPServer (stdio transport) | `mcp/server.py` |
-| S4-2 | MCPServer (SSE transport) | `mcp/server.py` |
-| S4-3 | `python -m open_kknaks.mcp` 실행 지원 | `mcp/__main__.py` |
-| S4-4 | README.md 작성 (Quick Start, API Reference, 예시) | `README.md` |
-| S4-5 | CHANGELOG.md | `CHANGELOG.md` |
-| S4-6 | PyPI 배포 (GitHub Actions) | `.github/workflows/publish.yml` |
-| S4-7 | E2E 테스트 + 커버리지 ≥ 70% | CI |
+| S3-1 | CLI (worker/queue/dlq/task 서브커맨드) | `cli/` |
+| S3-2 | MCPServer (stdio + SSE) | `mcp/` |
+| S3-3 | `python -m open_kknaks.mcp` 실행 지원 | `mcp/__main__.py` |
+| S3-4 | README.md (Quick Start, API Reference) | `README.md` |
+| S3-5 | PyPI 배포 (GitHub Actions) | `.github/workflows/publish.yml` |
+| S3-6 | E2E 테스트 + 커버리지 >= 70% | CI |
 
-**완료 기준:** `pip install open-kknaks` → 즉시 사용 가능, MCP 서버 연동 확인
+**완료 기준:** `pip install open-kknaks[redis]` → 즉시 사용 가능, MCP 연동 확인.
 
-### 전체 일정: 4.5주
+### 전체 일정: 3.5주
 
 ```
-S1 (1.5주) ─── S2 (1주) ─── S3 (1주) ─── S4 (1주)
-   코어          배치+MW       Redis        MCP+배포
+S1 (1.5주) ──── S2 (1주) ──── S3 (1주)
+ PTY+코어       MW+배치+DLQ    CLI+MCP+배포
 ```
 
 ---
 
-## 13. 제외 범위 (Non-Goals)
+## 14. 제외 범위 (Non-Goals)
 
 | 항목 | 이유 |
 |---|---|
-| 트리거 시스템 (webhook 서버, cron 스케줄러) | 유저 코드에서 붙이는 영역. 라이브러리 책임 아님 |
-| 웹 대시보드 UI | 라이브러리 범위 초과. 별도 프로젝트로 가능 |
-| Claude Code 이외의 LLM 실행 | 단일 책임 유지. 범용 태스크 큐는 Dramatiq/Celery 사용 |
-| Claude Code CLI 설치/로그인 | 유저 환경에 이미 설치되어 있어야 함 (전제 조건) |
-| RabbitMQ / SQS 등 추가 브로커 | MVP 이후 커뮤니티 기여로 확장 가능 |
-| 영속적 작업 히스토리 (DB) | 브로커 TTL로 관리. 히스토리가 필요하면 미들웨어로 DB 적재 |
+| Windows 지원 | PTY는 POSIX 전용. Windows는 향후 ConPTY 또는 subprocess fallback으로 검토 |
+| InMemoryBroker | 프로듀서/워커 분리 원칙에 위배. 테스트는 mock/fakeredis 사용 |
+| 트리거 시스템 (webhook, cron) | 유저 코드에서 붙이는 영역 |
+| 웹 대시보드 UI | 라이브러리 범위 초과 |
+| Claude Code 이외의 LLM 실행 | 단일 책임 유지 |
+| Claude Code CLI 설치/로그인 | 전제 조건 |
+| RabbitMQ / SQS 등 추가 브로커 | MVP 이후 커뮤니티 기여로 확장 |
 
 ---
 
-## 14. 리스크
+## 15. 리스크
 
 | 리스크 | 확률 | 영향 | 대응 |
 |---|---|---|---|
-| Claude Code CLI 인터페이스 변경 | 중 | 높음 | stream-json 포맷 파싱 로직을 분리하여 교체 용이하게 설계. CLI 버전 체크 추가 |
-| API rate limit | 중 | 중 | RateLimitMiddleware 기본 제공, 지수 백오프 |
-| pty spawn 플랫폼 이슈 (Windows) | 높음 | 중 | MVP는 Unix 전용 (macOS/Linux). Windows는 0.2.0 이후 `--output-format stream-json`이 pty 없이도 동작하므로 subprocess fallback |
-| Redis 의존성 복잡도 | 낮음 | 낮음 | InMemoryBroker를 기본값으로 제공하여 Redis 없이도 동작 |
-| MCP SDK 변경 | 중 | 중 | `mcp` 패키지를 optional으로 분리, 버전 고정 |
+| Claude Code CLI 인터페이스 변경 | 중 | 높음 | stream-json 파싱을 `stream_parser` 모듈로 분리하여 교체 용이하게 설계 |
+| PTY 플랫폼 이슈 (macOS vs Linux) | 중 | 중 | CI에서 양쪽 OS 테스트. `os.openpty()` 대신 `pty.openpty()` 사용 |
+| PTY fork 안정성 (asyncio 이벤트 루프 내) | 중 | 높음 | fork 전에 이벤트 루프 상태 정리. 전용 스레드에서 fork 검토 |
+| API rate limit | 중 | 중 | RateLimitMiddleware 기본 제공 |
+| Redis 의존성 | 낮음 | 낮음 | Redis는 운영 환경에서 사실상 표준 |
+| MCP SDK 변경 | 중 | 중 | optional 분리, 버전 고정 |
 
 ---
 
-## 부록 A: Dramatiq 개념 매핑 상세
+## 부록 A: v1 → v2 변경 요약
 
-| Dramatiq 개념 | open_kknaks 대응 | 비고 |
+| 항목 | v1 PRD | v2 PRD |
 |---|---|---|
-| `dramatiq.actor` (데코레이터) | 없음 | 실행 함수 고정 (Claude Code CLI) |
-| `actor.send()` | `runner.submit()` | |
-| `actor.send_with_options(delay=)` | `runner.submit(delay_seconds=)` | |
-| `message.get_result()` | `runner.result(task_id)` | |
-| `dramatiq.group()` | `runner.batch_submit(mode="parallel")` | |
-| `dramatiq.pipeline()` | `runner.batch_submit(mode="sequential")` | |
-| `Broker.add_middleware()` | `ClaudeRunner(middlewares=[...])` | 생성자 주입 |
-| `Results` middleware | 브로커에 통합 | 별도 result backend 불필요 |
-| `Retries` middleware | `RetryMiddleware` | 기본 제공 |
-| `TimeLimit` middleware | `TimeoutMiddleware` | 기본 제공 |
-| `dramatiq.Worker` | `Worker` | 내장, 자동 시작 |
+| 진입점 | `ClaudeRunner` 일체형 | `ClaudeClient` + `ClaudeWorker` 분리 |
+| Executor | subprocess PIPE | **PTY 기반** (fork + setsid) |
+| 프로세스 종료 | SIGTERM → SIGKILL (2단계) | **SIGHUP → SIGTERM → SIGKILL** (3단계) |
+| 큐 | 단일 | **멀티 큐 라우팅** |
+| 브로커 | AbstractBroker + InMemory + Redis | **AbstractBroker + RedisBroker** (InMemory 제거) |
+| DLQ | 없음 | **큐별 DLQ** |
+| ack/nack | ack만 | **ack + nack + requeue** |
+| 헬스체크 | 없음 | **heartbeat + 좀비 워커 감지** |
+| 미들웨어 시그널 | 6+2개 | **6개** (통합) |
+| 비용 제어 | 단순 추적 | **3단계** (Task/Worker/전체) |
+| 설정 | Runner 파라미터 | **ClaudeConfig 분리** (재사용 가능) |
+| CLI | 없음 | **4개 서브커맨드** (worker/queue/dlq/task) |
+| 행 감지 | 없음 | **idle_timeout** (PTY 무응답 감지) |
+| 플랫폼 | Linux/macOS/Windows | **Linux/macOS** (PTY 필수) |
+| 스프린트 | 4.5주 (4 sprint) | **3.5주** (3 sprint) |
 
-## 부록 B: Claude Code CLI 플래그 매핑
+## 부록 B: 근거 문서
 
-| Task 필드 | CLI 플래그 | 비고 |
-|---|---|---|
-| `prompt` | `-p "prompt"` | 필수 |
-| `context` | stdin 파이프 | `echo context \| claude -p` |
-| `work_dir` | `--cwd` 또는 subprocess cwd | |
-| `model` | `--model` | |
-| `allowed_tools` | `--allowedTools` | 공백 구분 리스트 |
-| `append_system_prompt` | `--append-system-prompt` | |
-| `max_turns` | `--max-turns` | |
-| `permission_mode` | `--permission-mode` / `--dangerously-skip-permissions` | |
-| `bare` | `--bare` | 기본 활성화 |
-| `session_id` (이어가기) | `--resume <session_id>` | |
-| `timeout` | `--max-budget-usd` (간접) + subprocess timeout | |
-| (항상) | `--output-format stream-json` | 파싱용 고정 |
-| (항상) | `--verbose` | 스트리밍 이벤트 포함 |
+| 문서 | 내용 |
+|---|---|
+| `ARCHITECTURE_V2.md` | 상세 기술 설계 (PTY Executor, Broker, Middleware, Worker 내부 구조) |
+| `CLAUDE_CODE_ANALYSIS.md` | Claude Code CLI 프로그래밍 제어 분석 + app_builder_local / persona_counselor 구현 사례 |
+| `DRAMATIQ_ANALYSIS.md` | Dramatiq 구조 분석 및 차용 근거 |

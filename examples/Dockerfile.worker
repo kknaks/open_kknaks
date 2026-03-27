@@ -1,0 +1,11 @@
+FROM python:3.12-slim
+
+WORKDIR /lib
+COPY open_kknaks ./open_kknaks
+COPY pyproject.toml .
+RUN pip install --no-cache-dir ".[redis]"
+
+WORKDIR /app
+COPY examples/worker/ .
+
+CMD ["python", "run.py"]

@@ -1,0 +1,46 @@
+services:
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      retries: 3
+
+  worker:
+    build:
+      context: ..
+      dockerfile: examples/Dockerfile.worker
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - NAMESPACE=example
+      - QUEUES=default,analysis,review
+      - CONCURRENCY=2
+      - WORK_DIR=/project
+      - PATH=/host-node/bin:/usr/local/bin:/usr/bin:/bin
+    volumes:
+      - ${HOME}/.claude:/root/.claude:ro
+      - ${CLAUDE_DIR}:/host-node:ro
+      - ..:/project:ro
+
+  app:
+    build:
+      context: ..
+      dockerfile: examples/Dockerfile.app
+    depends_on:
+      redis:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - NAMESPACE=example
+
+volumes:
+  redis_data:

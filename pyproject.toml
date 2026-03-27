@@ -1,0 +1,57 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "open-kknaks"
+version = "0.1.0"
+description = "PTY-based task queue library for Claude Code CLI"
+requires-python = ">=3.10"
+license = "MIT"
+authors = [{ name = "kknaks" }]
+dependencies = [
+    "pydantic>=2.7",
+    "structlog>=24.1",
+]
+
+[project.optional-dependencies]
+redis = ["redis>=5.0"]
+mcp = ["mcp>=1.6"]
+cli = ["typer>=0.12"]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+    "fakeredis[lua]>=2.21",
+    "ruff>=0.8",
+    "mypy>=1.13",
+    "coverage>=7.0",
+]
+
+[project.scripts]
+open-kknaks = "open_kknaks.cli.main:app"
+
+[tool.hatch.build.targets.sdist]
+exclude = ["examples/", "tests/", "docs/"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["open_kknaks"]
+exclude = ["examples/", "tests/", "docs/"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF"]
+
+[tool.ruff.format]
+quote-style = "double"
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
+plugins = ["pydantic.mypy"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+markers = ["e2e: end-to-end tests requiring real claude CLI"]
