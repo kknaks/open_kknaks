@@ -28,11 +28,11 @@ jobs:
 
       - name: Lint
         run: |
-          uv run ruff check open_kknaks/ tests/
-          uv run ruff format --check open_kknaks/ tests/
+          uv run ruff check open_kknaks/ tests/ --exclude open_kknaks/_version.py
+          uv run ruff format --check open_kknaks/ tests/ --exclude open_kknaks/_version.py
 
       - name: Type check
-        run: uv run mypy open_kknaks/
+        run: uv run mypy open_kknaks/ --exclude open_kknaks/_version.py
 
       - name: Test
         run: uv run pytest tests/ -v --ignore=tests/e2e
