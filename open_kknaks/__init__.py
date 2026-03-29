@@ -1,12 +1,9 @@
 """open_kknaks — PTY-based Claude Code task queue library."""
 
-from __future__ import annotations
-
-from typing import TYPE_CHECKING
-
 from open_kknaks._version import __version__, __version_tuple__  # noqa: F401
 from open_kknaks.batch import BatchRunner, BatchStatus
 from open_kknaks.broker.base import AbstractBroker
+from open_kknaks.broker.redis import RedisBroker
 from open_kknaks.client import ClaudeClient
 from open_kknaks.config import ClaudeConfig
 from open_kknaks.exceptions import (
@@ -21,9 +18,6 @@ from open_kknaks.exceptions import (
     TaskTimeoutError,
 )
 from open_kknaks.task import Priority, StreamEvent, Task, TaskResult, TaskStatus, TokenUsage
-
-if TYPE_CHECKING:
-    from open_kknaks.broker.redis import RedisBroker
 
 __all__ = [
     "AbstractBroker",
@@ -48,12 +42,3 @@ __all__ = [
     "TaskTimeoutError",
     "TokenUsage",
 ]
-
-
-def __getattr__(name: str) -> type:
-    if name == "RedisBroker":
-        from open_kknaks.broker.redis import RedisBroker
-
-        return RedisBroker
-    msg = f"module {__name__!r} has no attribute {name!r}"
-    raise AttributeError(msg)
