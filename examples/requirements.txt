@@ -1,0 +1,5 @@
+open-kknaks>=0.0.8
+fastapi
+uvicorn[standard]
+jinja2
+sse-starlette
