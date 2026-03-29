@@ -106,6 +106,20 @@ open-kknaks worker run \
     --concurrency 4
 ```
 
+#### Docker에서 실행
+
+```dockerfile
+FROM python:3.12-slim
+RUN pip install --no-cache-dir open-kknaks
+
+CMD ["open-kknaks", "worker", "run", \
+     "--broker", "redis://redis:6379", \
+     "--work-dir", "/workspace", \
+     "--model", "claude-sonnet-4-5-20250514", \
+     "--concurrency", "4", \
+     "--queues", "default"]
+```
+
 #### Python으로 실행
 
 ```python
