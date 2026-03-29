@@ -8,6 +8,7 @@ dynamic = ["version"]
 description = "PTY-based task queue library for Claude Code CLI"
 requires-python = ">=3.10"
 license = "MIT"
+readme = "README.md"
 authors = [{ name = "kknaks" }]
 dependencies = [
     "pydantic>=2.7",
