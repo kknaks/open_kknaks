@@ -67,6 +67,45 @@ class TestStreamEvent:
         assert event.type == "retry"
         assert event.retry_info == "rate limited"
 
+    def test_tool_use_event(self) -> None:
+        event = StreamEvent(type="tool_use", tool_name="Bash", tool_input={"command": "ls"})
+        assert event.type == "tool_use"
+        assert event.tool_name == "Bash"
+        assert event.tool_input == {"command": "ls"}
+
+    def test_tool_result_event(self) -> None:
+        event = StreamEvent(type="tool_result", tool_result="file1.txt", tool_is_error=False)
+        assert event.type == "tool_result"
+        assert event.tool_result == "file1.txt"
+        assert event.tool_is_error is False
+
+    def test_thinking_event(self) -> None:
+        event = StreamEvent(type="thinking", text="Let me analyze...")
+        assert event.type == "thinking"
+        assert event.text == "Let me analyze..."
+
+    def test_init_event(self) -> None:
+        event = StreamEvent(type="init", model="claude-sonnet-4-20250514", session_id="sess-123")
+        assert event.type == "init"
+        assert event.model == "claude-sonnet-4-20250514"
+        assert event.session_id == "sess-123"
+
+    def test_progress_event(self) -> None:
+        event = StreamEvent(
+            type="progress",
+            total_tokens=50594,
+            tool_uses=42,
+            duration_ms=46332,
+            description="Reading ~/file.py",
+            last_tool_name="Read",
+        )
+        assert event.type == "progress"
+        assert event.total_tokens == 50594
+        assert event.tool_uses == 42
+        assert event.duration_ms == 46332
+        assert event.description == "Reading ~/file.py"
+        assert event.last_tool_name == "Read"
+
 
 class TestTaskResult:
     def test_defaults(self) -> None:

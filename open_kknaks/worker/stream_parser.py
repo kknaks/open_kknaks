@@ -15,13 +15,19 @@ def strip_ansi(text: str) -> str:
     return _ANSI_RE.sub("", text)
 
 
-def parse_stream_json_line(line: str) -> dict[str, Any] | None:
+def parse_stream_json_line(line: str) -> dict[str, Any] | list[dict[str, Any]] | None:
     """Parse a single stream-json line from Claude Code CLI.
 
     Returns one of:
         {"type": "text", "content": str}
         {"type": "cost", "cost_usd": float, "input_tokens": int, ...}
         {"type": "retry", "error": str, "error_status": int | None, ...}
+        {"type": "tool_use", "tool_name": str, "tool_input": dict}
+        {"type": "tool_result", "tool_result": str, "tool_is_error": bool}
+        {"type": "thinking", "content": str}
+        {"type": "init", "model": str, "session_id": str}
+        {"type": "progress", "total_tokens": int, "tool_uses": int, ...}
+        list[dict] — when an assistant message contains multiple content blocks
         None — line to ignore (empty, malformed, or unrecognized type)
 
     Raises:
@@ -68,18 +74,43 @@ def parse_stream_json_line(line: str) -> dict[str, Any] | None:
     # --- Assistant message (intermediate output) ---
     elif msg_type == "assistant":
         content = obj.get("message", {}).get("content", [])
-        texts: list[str] = []
+        events: list[dict[str, Any]] = []
         for block in content:
-            if isinstance(block, dict) and block.get("type") == "text":
-                text = block.get("text", "")
-                if text:
-                    texts.append(text)
+            if isinstance(block, dict):
+                block_type = block.get("type", "")
+                if block_type == "text":
+                    text = block.get("text", "")
+                    if text:
+                        events.append({"type": "text", "content": text})
+                elif block_type == "tool_use":
+                    events.append({
+                        "type": "tool_use",
+                        "tool_name": block.get("name", ""),
+                        "tool_input": block.get("input", {}),
+                    })
+                elif block_type == "thinking":
+                    text = block.get("thinking", "") or block.get("text", "")
+                    if text:
+                        events.append({"type": "thinking", "content": text})
             elif isinstance(block, str) and block:
-                texts.append(block)
-        if texts:
-            return {"type": "text", "content": "\n".join(texts)}
+                events.append({"type": "text", "content": block})
+        if not events:
+            return None
+        return events[0] if len(events) == 1 else events
 
-    # --- System events (retry, errors) ---
+    # --- Tool result (separate message) ---
+    elif msg_type == "tool_result":
+        content = obj.get("content", "")
+        if isinstance(content, list):
+            texts = [b.get("text", "") for b in content if isinstance(b, dict)]
+            content = "\n".join(t for t in texts if t)
+        return {
+            "type": "tool_result",
+            "tool_result": str(content) if content else "",
+            "tool_is_error": obj.get("is_error", False),
+        }
+
+    # --- System events (retry, init, progress, errors) ---
     elif msg_type == "system":
         subtype = obj.get("subtype", "")
 
@@ -102,15 +133,38 @@ def parse_stream_json_line(line: str) -> dict[str, Any] | None:
                 "retry_delay_ms": obj.get("retry_delay_ms", 0),
             }
 
+        if subtype == "init":
+            return {
+                "type": "init",
+                "model": obj.get("model", ""),
+                "session_id": obj.get("session_id", ""),
+            }
+
+        if subtype == "task_progress":
+            usage = obj.get("usage", {})
+            return {
+                "type": "progress",
+                "total_tokens": usage.get("total_tokens", 0),
+                "tool_uses": usage.get("tool_uses", 0),
+                "duration_ms": usage.get("duration_ms", 0),
+                "description": obj.get("description", ""),
+                "last_tool_name": obj.get("last_tool_name", ""),
+            }
+
     # --- Partial streaming (--include-partial-messages) ---
     elif msg_type == "stream_event":
         event = obj.get("event", {})
         event_type = event.get("type", "")
         if event_type == "content_block_delta":
             delta = event.get("delta", {})
-            if delta.get("type") == "text_delta":
+            delta_type = delta.get("type", "")
+            if delta_type == "text_delta":
                 text = delta.get("text", "")
                 if text:
                     return {"type": "text", "content": text}
+            elif delta_type == "thinking_delta":
+                text = delta.get("thinking", "") or delta.get("text", "")
+                if text:
+                    return {"type": "thinking", "content": text}
 
     return None

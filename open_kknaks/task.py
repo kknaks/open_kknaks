@@ -3,7 +3,7 @@
 import uuid
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -45,10 +45,32 @@ class StreamEvent(BaseModel):
 
     model_config = ConfigDict(use_enum_values=True)
 
-    type: Literal["text", "cost", "retry"]
+    type: Literal[
+        "text", "cost", "retry",
+        "tool_use", "tool_result", "thinking",
+        "init", "progress",
+    ]
+    # text / thinking
     text: str | None = None
+    # cost
     cost_usd: float | None = None
+    # retry
     retry_info: str | None = None
+    # tool_use
+    tool_name: str | None = None
+    tool_input: dict[str, Any] | None = None
+    # tool_result
+    tool_result: str | None = None
+    tool_is_error: bool | None = None
+    # init
+    model: str | None = None
+    session_id: str | None = None
+    # progress
+    total_tokens: int | None = None
+    tool_uses: int | None = None
+    duration_ms: int | None = None
+    description: str | None = None
+    last_tool_name: str | None = None
 
 
 class TaskResult(BaseModel):

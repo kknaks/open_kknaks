@@ -109,17 +109,32 @@ class ClaudeClient:
         # Final check
         return await self.broker.get_task(task_id)
 
-    async def stream(self, task_id: str, *, timeout: float = 600) -> AsyncIterator[StreamEvent]:
+    async def stream(
+        self,
+        task_id: str,
+        *,
+        timeout: float = 600,
+        event_types: set[str] | None = None,
+    ) -> AsyncIterator[StreamEvent]:
         """Stream task output in real-time.
 
         Yields StreamEvent objects as they arrive via XREAD BLOCK.
         Stops after timeout seconds.
+
+        Args:
+            task_id: Task to stream events from.
+            timeout: Max seconds to stream.
+            event_types: If set, only yield events whose type is in this set.
+                Valid types: "text", "cost", "retry", "tool_use",
+                "tool_result", "thinking", "init", "progress".
+                If None, all events are yielded.
         """
         import time
 
         deadline = time.monotonic() + timeout
         async for event in self.broker.subscribe_chunks(task_id):
-            yield event
+            if event_types is None or event.type in event_types:
+                yield event
             if time.monotonic() >= deadline:
                 return
 

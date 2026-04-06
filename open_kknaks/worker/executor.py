@@ -247,68 +247,136 @@ class ClaudeCodeExecutor:
                     if parsed is None:
                         continue
 
-                    event_type = parsed["type"]
+                    # Normalize: single dict → list
+                    events_list = parsed if isinstance(parsed, list) else [parsed]
 
-                    if event_type == "text":
-                        content = str(parsed["content"])
-                        output_parts.append(content)
-                        if on_chunk:
-                            event = StreamEvent(type="text", text=content)
-                            try:
-                                await on_chunk(event)
-                            except Exception:
-                                logger.warning("on_chunk callback error", task_id=task.id, exc_info=True)
+                    for event_data in events_list:
+                        event_type = event_data["type"]
 
-                    elif event_type == "cost":
-                        usage = TokenUsage(
-                            cost_usd=float(parsed.get("cost_usd", 0) or 0),
-                            input_tokens=int(parsed.get("input_tokens", 0) or 0),
-                            output_tokens=int(parsed.get("output_tokens", 0) or 0),
-                            cache_read_tokens=int(parsed.get("cache_read_tokens", 0) or 0),
-                            cache_write_tokens=int(parsed.get("cache_write_tokens", 0) or 0),
-                            duration_ms=int(parsed.get("duration_ms", 0) or 0),
-                        )
-                        session_id = parsed.get("session_id") or session_id
-                        if on_chunk:
-                            event = StreamEvent(type="cost", cost_usd=usage.cost_usd)
-                            try:
-                                await on_chunk(event)
-                            except Exception:
-                                logger.warning("on_chunk callback error", task_id=task.id, exc_info=True)
+                        if event_type == "text":
+                            content = str(event_data["content"])
+                            output_parts.append(content)
+                            if on_chunk:
+                                try:
+                                    await on_chunk(StreamEvent(type="text", text=content))
+                                except Exception:
+                                    logger.warning("on_chunk callback error", task_id=task.id, exc_info=True)
 
-                    elif event_type == "retry":
-                        if on_chunk:
-                            event = StreamEvent(
-                                type="retry",
-                                retry_info=str(parsed.get("error", "unknown")),
+                        elif event_type == "cost":
+                            usage = TokenUsage(
+                                cost_usd=float(event_data.get("cost_usd", 0) or 0),
+                                input_tokens=int(event_data.get("input_tokens", 0) or 0),
+                                output_tokens=int(event_data.get("output_tokens", 0) or 0),
+                                cache_read_tokens=int(event_data.get("cache_read_tokens", 0) or 0),
+                                cache_write_tokens=int(event_data.get("cache_write_tokens", 0) or 0),
+                                duration_ms=int(event_data.get("duration_ms", 0) or 0),
                             )
-                            try:
-                                await on_chunk(event)
-                            except Exception:
-                                logger.warning("on_chunk callback error", task_id=task.id, exc_info=True)
+                            session_id = event_data.get("session_id") or session_id
+                            if on_chunk:
+                                try:
+                                    await on_chunk(StreamEvent(type="cost", cost_usd=usage.cost_usd))
+                                except Exception:
+                                    logger.warning("on_chunk callback error", task_id=task.id, exc_info=True)
+
+                        elif event_type == "retry":
+                            if on_chunk:
+                                try:
+                                    await on_chunk(StreamEvent(
+                                        type="retry",
+                                        retry_info=str(event_data.get("error", "unknown")),
+                                    ))
+                                except Exception:
+                                    logger.warning("on_chunk callback error", task_id=task.id, exc_info=True)
+
+                        elif event_type == "tool_use":
+                            if on_chunk:
+                                try:
+                                    await on_chunk(StreamEvent(
+                                        type="tool_use",
+                                        tool_name=event_data.get("tool_name"),
+                                        tool_input=event_data.get("tool_input"),
+                                    ))
+                                except Exception:
+                                    logger.warning("on_chunk callback error", task_id=task.id, exc_info=True)
+
+                        elif event_type == "tool_result":
+                            if on_chunk:
+                                try:
+                                    await on_chunk(StreamEvent(
+                                        type="tool_result",
+                                        tool_result=event_data.get("tool_result"),
+                                        tool_is_error=event_data.get("tool_is_error"),
+                                    ))
+                                except Exception:
+                                    logger.warning("on_chunk callback error", task_id=task.id, exc_info=True)
+
+                        elif event_type == "thinking":
+                            if on_chunk:
+                                try:
+                                    await on_chunk(StreamEvent(
+                                        type="thinking",
+                                        text=str(event_data.get("content", "")),
+                                    ))
+                                except Exception:
+                                    logger.warning("on_chunk callback error", task_id=task.id, exc_info=True)
+
+                        elif event_type == "init":
+                            session_id = event_data.get("session_id") or session_id
+                            if on_chunk:
+                                try:
+                                    await on_chunk(StreamEvent(
+                                        type="init",
+                                        model=event_data.get("model"),
+                                        session_id=event_data.get("session_id"),
+                                    ))
+                                except Exception:
+                                    logger.warning("on_chunk callback error", task_id=task.id, exc_info=True)
+
+                        elif event_type == "progress":
+                            if on_chunk:
+                                try:
+                                    await on_chunk(StreamEvent(
+                                        type="progress",
+                                        total_tokens=event_data.get("total_tokens"),
+                                        tool_uses=event_data.get("tool_uses"),
+                                        duration_ms=event_data.get("duration_ms"),
+                                        description=event_data.get("description"),
+                                        last_tool_name=event_data.get("last_tool_name"),
+                                    ))
+                                except Exception:
+                                    logger.warning("on_chunk callback error", task_id=task.id, exc_info=True)
 
             # Process any remaining lines after done
             for line in line_buffer.get_lines():
                 parsed = parse_stream_json_line(line)
-                if parsed and parsed["type"] == "text":
-                    output_parts.append(str(parsed["content"]))
-                elif parsed and parsed["type"] == "cost":
-                    usage = TokenUsage(
-                        cost_usd=float(parsed.get("cost_usd", 0) or 0),
-                        input_tokens=int(parsed.get("input_tokens", 0) or 0),
-                        output_tokens=int(parsed.get("output_tokens", 0) or 0),
-                        cache_read_tokens=int(parsed.get("cache_read_tokens", 0) or 0),
-                        cache_write_tokens=int(parsed.get("cache_write_tokens", 0) or 0),
-                        duration_ms=int(parsed.get("duration_ms", 0) or 0),
-                    )
-                    session_id = parsed.get("session_id") or session_id
+                if parsed is None:
+                    continue
+                remaining_events = parsed if isinstance(parsed, list) else [parsed]
+                for ev in remaining_events:
+                    if ev["type"] == "text":
+                        output_parts.append(str(ev["content"]))
+                    elif ev["type"] == "cost":
+                        usage = TokenUsage(
+                            cost_usd=float(ev.get("cost_usd", 0) or 0),
+                            input_tokens=int(ev.get("input_tokens", 0) or 0),
+                            output_tokens=int(ev.get("output_tokens", 0) or 0),
+                            cache_read_tokens=int(ev.get("cache_read_tokens", 0) or 0),
+                            cache_write_tokens=int(ev.get("cache_write_tokens", 0) or 0),
+                            duration_ms=int(ev.get("duration_ms", 0) or 0),
+                        )
+                        session_id = ev.get("session_id") or session_id
+                    elif ev["type"] == "init":
+                        session_id = ev.get("session_id") or session_id
 
             # Flush remaining buffer
             remaining = line_buffer.flush()
             if remaining:
                 parsed = parse_stream_json_line(remaining)
-                if parsed and parsed["type"] == "text":
-                    output_parts.append(str(parsed["content"]))
+                if parsed is not None:
+                    flush_events = parsed if isinstance(parsed, list) else [parsed]
+                    for ev in flush_events:
+                        if ev["type"] == "text":
+                            output_parts.append(str(ev["content"]))
 
         finally:
             loop.remove_reader(process.master_fd)

@@ -88,8 +88,10 @@ class TestParseAssistant:
             }
         )
         parsed = parse_stream_json_line(line)
-        assert parsed is not None
-        assert parsed["content"] == "line1\nline2"
+        assert isinstance(parsed, list)
+        assert len(parsed) == 2
+        assert parsed[0]["content"] == "line1"
+        assert parsed[1]["content"] == "line2"
 
     def test_string_content(self) -> None:
         line = json.dumps(
@@ -216,8 +218,8 @@ class TestEdgeCases:
         line = json.dumps({"type": "unknown_event", "data": "something"})
         assert parse_stream_json_line(line) is None
 
-    def test_system_non_retry_subtype(self) -> None:
-        line = json.dumps({"type": "system", "subtype": "init", "session_id": "abc"})
+    def test_system_unknown_subtype(self) -> None:
+        line = json.dumps({"type": "system", "subtype": "unknown_sub", "data": "x"})
         assert parse_stream_json_line(line) is None
 
     def test_ansi_in_text(self) -> None:
@@ -227,3 +229,236 @@ class TestEdgeCases:
         assert parsed is not None
         assert parsed["type"] == "text"
         assert parsed["content"] == "clean text"
+
+
+class TestParseToolUse:
+    def test_tool_use_in_assistant(self) -> None:
+        line = json.dumps(
+            {
+                "type": "assistant",
+                "message": {
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "name": "Bash",
+                            "input": {"command": "ls -la"},
+                        }
+                    ]
+                },
+            }
+        )
+        parsed = parse_stream_json_line(line)
+        assert parsed is not None
+        assert parsed["type"] == "tool_use"
+        assert parsed["tool_name"] == "Bash"
+        assert parsed["tool_input"] == {"command": "ls -la"}
+
+    def test_tool_use_empty_input(self) -> None:
+        line = json.dumps(
+            {
+                "type": "assistant",
+                "message": {
+                    "content": [
+                        {"type": "tool_use", "name": "Read", "input": {}}
+                    ]
+                },
+            }
+        )
+        parsed = parse_stream_json_line(line)
+        assert parsed is not None
+        assert parsed["tool_name"] == "Read"
+        assert parsed["tool_input"] == {}
+
+
+class TestParseToolResult:
+    def test_tool_result_string_content(self) -> None:
+        line = json.dumps(
+            {
+                "type": "tool_result",
+                "tool_use_id": "toolu_123",
+                "content": "file1.txt\nfile2.txt",
+            }
+        )
+        parsed = parse_stream_json_line(line)
+        assert parsed is not None
+        assert parsed["type"] == "tool_result"
+        assert parsed["tool_result"] == "file1.txt\nfile2.txt"
+        assert parsed["tool_is_error"] is False
+
+    def test_tool_result_list_content(self) -> None:
+        line = json.dumps(
+            {
+                "type": "tool_result",
+                "tool_use_id": "toolu_456",
+                "content": [{"type": "text", "text": "output line 1"}, {"type": "text", "text": "output line 2"}],
+            }
+        )
+        parsed = parse_stream_json_line(line)
+        assert parsed is not None
+        assert parsed["tool_result"] == "output line 1\noutput line 2"
+
+    def test_tool_result_error(self) -> None:
+        line = json.dumps(
+            {
+                "type": "tool_result",
+                "tool_use_id": "toolu_789",
+                "content": "command not found",
+                "is_error": True,
+            }
+        )
+        parsed = parse_stream_json_line(line)
+        assert parsed is not None
+        assert parsed["tool_is_error"] is True
+
+
+class TestParseThinking:
+    def test_thinking_in_assistant(self) -> None:
+        line = json.dumps(
+            {
+                "type": "assistant",
+                "message": {
+                    "content": [
+                        {"type": "thinking", "thinking": "Let me analyze this..."}
+                    ]
+                },
+            }
+        )
+        parsed = parse_stream_json_line(line)
+        assert parsed is not None
+        assert parsed["type"] == "thinking"
+        assert parsed["content"] == "Let me analyze this..."
+
+    def test_thinking_delta(self) -> None:
+        line = json.dumps(
+            {
+                "type": "stream_event",
+                "event": {
+                    "type": "content_block_delta",
+                    "delta": {"type": "thinking_delta", "thinking": "step 1..."},
+                },
+            }
+        )
+        parsed = parse_stream_json_line(line)
+        assert parsed is not None
+        assert parsed["type"] == "thinking"
+        assert parsed["content"] == "step 1..."
+
+    def test_thinking_delta_text_fallback(self) -> None:
+        line = json.dumps(
+            {
+                "type": "stream_event",
+                "event": {
+                    "type": "content_block_delta",
+                    "delta": {"type": "thinking_delta", "text": "fallback text"},
+                },
+            }
+        )
+        parsed = parse_stream_json_line(line)
+        assert parsed is not None
+        assert parsed["type"] == "thinking"
+        assert parsed["content"] == "fallback text"
+
+
+class TestParseInit:
+    def test_system_init(self) -> None:
+        line = json.dumps(
+            {
+                "type": "system",
+                "subtype": "init",
+                "model": "claude-sonnet-4-20250514",
+                "session_id": "sess-abc-123",
+            }
+        )
+        parsed = parse_stream_json_line(line)
+        assert parsed is not None
+        assert parsed["type"] == "init"
+        assert parsed["model"] == "claude-sonnet-4-20250514"
+        assert parsed["session_id"] == "sess-abc-123"
+
+    def test_system_init_missing_fields(self) -> None:
+        line = json.dumps({"type": "system", "subtype": "init"})
+        parsed = parse_stream_json_line(line)
+        assert parsed is not None
+        assert parsed["type"] == "init"
+        assert parsed["model"] == ""
+        assert parsed["session_id"] == ""
+
+
+class TestParseProgress:
+    def test_task_progress(self) -> None:
+        line = json.dumps(
+            {
+                "type": "system",
+                "subtype": "task_progress",
+                "description": "Reading ~/file.py",
+                "usage": {
+                    "total_tokens": 50594,
+                    "tool_uses": 42,
+                    "duration_ms": 46332,
+                },
+                "last_tool_name": "Read",
+                "session_id": "sess-123",
+            }
+        )
+        parsed = parse_stream_json_line(line)
+        assert parsed is not None
+        assert parsed["type"] == "progress"
+        assert parsed["total_tokens"] == 50594
+        assert parsed["tool_uses"] == 42
+        assert parsed["duration_ms"] == 46332
+        assert parsed["description"] == "Reading ~/file.py"
+        assert parsed["last_tool_name"] == "Read"
+
+    def test_task_progress_missing_usage(self) -> None:
+        line = json.dumps(
+            {
+                "type": "system",
+                "subtype": "task_progress",
+                "description": "Working...",
+            }
+        )
+        parsed = parse_stream_json_line(line)
+        assert parsed is not None
+        assert parsed["total_tokens"] == 0
+        assert parsed["tool_uses"] == 0
+        assert parsed["duration_ms"] == 0
+
+
+class TestAssistantMixedContent:
+    def test_text_and_tool_use(self) -> None:
+        line = json.dumps(
+            {
+                "type": "assistant",
+                "message": {
+                    "content": [
+                        {"type": "text", "text": "Let me check"},
+                        {"type": "tool_use", "name": "Bash", "input": {"command": "ls"}},
+                    ]
+                },
+            }
+        )
+        parsed = parse_stream_json_line(line)
+        assert isinstance(parsed, list)
+        assert len(parsed) == 2
+        assert parsed[0]["type"] == "text"
+        assert parsed[0]["content"] == "Let me check"
+        assert parsed[1]["type"] == "tool_use"
+        assert parsed[1]["tool_name"] == "Bash"
+
+    def test_thinking_and_text(self) -> None:
+        line = json.dumps(
+            {
+                "type": "assistant",
+                "message": {
+                    "content": [
+                        {"type": "thinking", "thinking": "Analyzing..."},
+                        {"type": "text", "text": "Here is the answer"},
+                    ]
+                },
+            }
+        )
+        parsed = parse_stream_json_line(line)
+        assert isinstance(parsed, list)
+        assert len(parsed) == 2
+        assert parsed[0]["type"] == "thinking"
+        assert parsed[1]["type"] == "text"

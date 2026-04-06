@@ -71,10 +71,66 @@ asyncio.run(main())
 ```python
 task_id = await client.submit("Write a FastAPI TODO app.")
 
+# 전체 이벤트 수신
 async for event in client.stream(task_id):
-    if event.text:
+    if event.type == "text":
         print(event.text, end="", flush=True)
+    elif event.type == "tool_use":
+        print(f"\n[tool] {event.tool_name}: {event.tool_input}")
+    elif event.type == "tool_result":
+        print(f"\n[result] {event.tool_result[:100]}")
+    elif event.type == "thinking":
+        print(f"\n[thinking] {event.text[:80]}...")
+    elif event.type == "progress":
+        print(f"\n[progress] tokens={event.total_tokens} tools={event.tool_uses} | {event.description}")
+    elif event.type == "init":
+        print(f"\n[init] model={event.model} session={event.session_id}")
+    elif event.type == "cost":
+        print(f"\n[cost] ${event.cost_usd}")
+    elif event.type == "retry":
+        print(f"\n[retry] {event.retry_info}")
 ```
+
+#### 이벤트 필터링
+
+필요한 이벤트 타입만 골라 받을 수 있습니다:
+
+```python
+# 텍스트와 진행 상황만
+async for event in client.stream(task_id, event_types={"text", "progress"}):
+    if event.type == "text":
+        print(event.text, end="", flush=True)
+    elif event.type == "progress":
+        print(f"\n  [{event.total_tokens} tokens]", end="")
+
+# 도구 사용 모니터링
+async for event in client.stream(task_id, event_types={"tool_use", "tool_result"}):
+    if event.type == "tool_use":
+        print(f"  -> {event.tool_name}({event.tool_input})")
+    elif event.type == "tool_result":
+        err = " [ERROR]" if event.tool_is_error else ""
+        print(f"  <- {event.tool_result[:100]}{err}")
+
+# 세션 컴팩션 판단 (토큰 누적량 모니터링)
+async for event in client.stream(task_id, event_types={"progress"}):
+    if event.total_tokens and event.total_tokens > 100_000:
+        print("Context too large — consider starting a new session")
+        await client.cancel(task_id)
+        break
+```
+
+#### StreamEvent 타입
+
+| 타입 | 설명 | 주요 필드 |
+|------|------|-----------|
+| `text` | 어시스턴트 텍스트 출력 | `text` |
+| `tool_use` | 도구 호출 | `tool_name`, `tool_input` |
+| `tool_result` | 도구 실행 결과 | `tool_result`, `tool_is_error` |
+| `thinking` | 사고 과정 (extended thinking) | `text` |
+| `init` | 세션 초기화 | `model`, `session_id` |
+| `progress` | 진행 상황 (매 도구 실행마다) | `total_tokens`, `tool_uses`, `duration_ms`, `description`, `last_tool_name` |
+| `cost` | 최종 비용/토큰 사용량 | `cost_usd` |
+| `retry` | API 재시도 정보 | `retry_info` |
 
 #### 배치 실행
 
