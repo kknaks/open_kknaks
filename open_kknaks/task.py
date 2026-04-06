@@ -46,9 +46,14 @@ class StreamEvent(BaseModel):
     model_config = ConfigDict(use_enum_values=True)
 
     type: Literal[
-        "text", "cost", "retry",
-        "tool_use", "tool_result", "thinking",
-        "init", "progress",
+        "text",
+        "cost",
+        "retry",
+        "tool_use",
+        "tool_result",
+        "thinking",
+        "init",
+        "progress",
     ]
     # text / thinking
     text: str | None = None

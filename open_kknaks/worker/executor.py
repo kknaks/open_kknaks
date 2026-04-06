@@ -281,42 +281,50 @@ class ClaudeCodeExecutor:
                         elif event_type == "retry":
                             if on_chunk:
                                 try:
-                                    await on_chunk(StreamEvent(
-                                        type="retry",
-                                        retry_info=str(event_data.get("error", "unknown")),
-                                    ))
+                                    await on_chunk(
+                                        StreamEvent(
+                                            type="retry",
+                                            retry_info=str(event_data.get("error", "unknown")),
+                                        )
+                                    )
                                 except Exception:
                                     logger.warning("on_chunk callback error", task_id=task.id, exc_info=True)
 
                         elif event_type == "tool_use":
                             if on_chunk:
                                 try:
-                                    await on_chunk(StreamEvent(
-                                        type="tool_use",
-                                        tool_name=event_data.get("tool_name"),
-                                        tool_input=event_data.get("tool_input"),
-                                    ))
+                                    await on_chunk(
+                                        StreamEvent(
+                                            type="tool_use",
+                                            tool_name=event_data.get("tool_name"),
+                                            tool_input=event_data.get("tool_input"),
+                                        )
+                                    )
                                 except Exception:
                                     logger.warning("on_chunk callback error", task_id=task.id, exc_info=True)
 
                         elif event_type == "tool_result":
                             if on_chunk:
                                 try:
-                                    await on_chunk(StreamEvent(
-                                        type="tool_result",
-                                        tool_result=event_data.get("tool_result"),
-                                        tool_is_error=event_data.get("tool_is_error"),
-                                    ))
+                                    await on_chunk(
+                                        StreamEvent(
+                                            type="tool_result",
+                                            tool_result=event_data.get("tool_result"),
+                                            tool_is_error=event_data.get("tool_is_error"),
+                                        )
+                                    )
                                 except Exception:
                                     logger.warning("on_chunk callback error", task_id=task.id, exc_info=True)
 
                         elif event_type == "thinking":
                             if on_chunk:
                                 try:
-                                    await on_chunk(StreamEvent(
-                                        type="thinking",
-                                        text=str(event_data.get("content", "")),
-                                    ))
+                                    await on_chunk(
+                                        StreamEvent(
+                                            type="thinking",
+                                            text=str(event_data.get("content", "")),
+                                        )
+                                    )
                                 except Exception:
                                     logger.warning("on_chunk callback error", task_id=task.id, exc_info=True)
 
@@ -324,25 +332,29 @@ class ClaudeCodeExecutor:
                             session_id = event_data.get("session_id") or session_id
                             if on_chunk:
                                 try:
-                                    await on_chunk(StreamEvent(
-                                        type="init",
-                                        model=event_data.get("model"),
-                                        session_id=event_data.get("session_id"),
-                                    ))
+                                    await on_chunk(
+                                        StreamEvent(
+                                            type="init",
+                                            model=event_data.get("model"),
+                                            session_id=event_data.get("session_id"),
+                                        )
+                                    )
                                 except Exception:
                                     logger.warning("on_chunk callback error", task_id=task.id, exc_info=True)
 
                         elif event_type == "progress":
                             if on_chunk:
                                 try:
-                                    await on_chunk(StreamEvent(
-                                        type="progress",
-                                        total_tokens=event_data.get("total_tokens"),
-                                        tool_uses=event_data.get("tool_uses"),
-                                        duration_ms=event_data.get("duration_ms"),
-                                        description=event_data.get("description"),
-                                        last_tool_name=event_data.get("last_tool_name"),
-                                    ))
+                                    await on_chunk(
+                                        StreamEvent(
+                                            type="progress",
+                                            total_tokens=event_data.get("total_tokens"),
+                                            tool_uses=event_data.get("tool_uses"),
+                                            duration_ms=event_data.get("duration_ms"),
+                                            description=event_data.get("description"),
+                                            last_tool_name=event_data.get("last_tool_name"),
+                                        )
+                                    )
                                 except Exception:
                                     logger.warning("on_chunk callback error", task_id=task.id, exc_info=True)
 

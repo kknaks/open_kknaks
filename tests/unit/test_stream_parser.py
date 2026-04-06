@@ -257,11 +257,7 @@ class TestParseToolUse:
         line = json.dumps(
             {
                 "type": "assistant",
-                "message": {
-                    "content": [
-                        {"type": "tool_use", "name": "Read", "input": {}}
-                    ]
-                },
+                "message": {"content": [{"type": "tool_use", "name": "Read", "input": {}}]},
             }
         )
         parsed = parse_stream_json_line(line)
@@ -316,11 +312,7 @@ class TestParseThinking:
         line = json.dumps(
             {
                 "type": "assistant",
-                "message": {
-                    "content": [
-                        {"type": "thinking", "thinking": "Let me analyze this..."}
-                    ]
-                },
+                "message": {"content": [{"type": "thinking", "thinking": "Let me analyze this..."}]},
             }
         )
         parsed = parse_stream_json_line(line)

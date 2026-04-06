@@ -83,11 +83,13 @@ def parse_stream_json_line(line: str) -> dict[str, Any] | list[dict[str, Any]] |
                     if text:
                         events.append({"type": "text", "content": text})
                 elif block_type == "tool_use":
-                    events.append({
-                        "type": "tool_use",
-                        "tool_name": block.get("name", ""),
-                        "tool_input": block.get("input", {}),
-                    })
+                    events.append(
+                        {
+                            "type": "tool_use",
+                            "tool_name": block.get("name", ""),
+                            "tool_input": block.get("input", {}),
+                        }
+                    )
                 elif block_type == "thinking":
                     text = block.get("thinking", "") or block.get("text", "")
                     if text:
