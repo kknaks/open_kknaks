@@ -110,16 +110,19 @@ class TestStreamEvent:
 class TestTaskResult:
     def test_defaults(self) -> None:
         result = TaskResult()
-        assert result.output == ""
+        assert result.result == ""
+        assert result.stream == ""
         assert result.exit_code == 0
         assert result.session_id is None
         assert result.usage is None
 
     def test_with_usage(self) -> None:
         usage = TokenUsage(cost_usd=0.1, input_tokens=500)
-        result = TaskResult(output="done", exit_code=0, session_id="sess-1", usage=usage)
+        result = TaskResult(result="done", stream="done", exit_code=0, session_id="sess-1", usage=usage)
         assert result.usage is not None
         assert result.usage.cost_usd == 0.1
+        assert result.result == "done"
+        assert result.stream == "done"
 
 
 class TestTask:

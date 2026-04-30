@@ -51,7 +51,7 @@ class ClaudeCodeExecutor:
             on_chunk: Optional async callback for real-time streaming.
 
         Returns:
-            TaskResult with output, exit_code, session_id, usage.
+            TaskResult with result, stream, exit_code, session_id, usage.
 
         Raises:
             TaskTimeoutError: If task exceeds its timeout.
@@ -195,7 +195,8 @@ class ClaudeCodeExecutor:
         """Read PTY output, parse stream-json, handle timeouts."""
         loop = asyncio.get_running_loop()
         line_buffer = LineBuffer()
-        output_parts: list[str] = []
+        result_text: str = ""
+        stream_parts: list[str] = []
         usage: TokenUsage | None = None
         session_id: str | None = None
         done = asyncio.Event()
@@ -255,7 +256,10 @@ class ClaudeCodeExecutor:
 
                         if event_type == "text":
                             content = str(event_data["content"])
-                            output_parts.append(content)
+                            source = event_data.get("source")
+                            stream_parts.append(content)
+                            if source == "result":
+                                result_text = content
                             if on_chunk:
                                 try:
                                     await on_chunk(StreamEvent(type="text", text=content))
@@ -366,7 +370,10 @@ class ClaudeCodeExecutor:
                 remaining_events = parsed if isinstance(parsed, list) else [parsed]
                 for ev in remaining_events:
                     if ev["type"] == "text":
-                        output_parts.append(str(ev["content"]))
+                        content = str(ev["content"])
+                        stream_parts.append(content)
+                        if ev.get("source") == "result":
+                            result_text = content
                     elif ev["type"] == "cost":
                         usage = TokenUsage(
                             cost_usd=float(ev.get("cost_usd", 0) or 0),
@@ -388,16 +395,19 @@ class ClaudeCodeExecutor:
                     flush_events = parsed if isinstance(parsed, list) else [parsed]
                     for ev in flush_events:
                         if ev["type"] == "text":
-                            output_parts.append(str(ev["content"]))
+                            content = str(ev["content"])
+                            stream_parts.append(content)
+                            if ev.get("source") == "result":
+                                result_text = content
 
         finally:
             loop.remove_reader(process.master_fd)
 
         # Wait for process exit
         exit_code = await self._wait_for_exit(process)
-        output = "\n".join(output_parts)
+        stream = "\n".join(stream_parts)
 
-        if exit_code != 0 and not output.strip():
+        if exit_code != 0 and not stream.strip():
             logger.error(
                 "executor.empty_result_nonzero_exit",
                 task_id=task.id,
@@ -406,7 +416,8 @@ class ClaudeCodeExecutor:
             )
 
         return TaskResult(
-            output=output,
+            result=result_text,
+            stream=stream,
             exit_code=exit_code,
             session_id=session_id,
             usage=usage,

@@ -23,7 +23,8 @@ class TestStripAnsi:
 
 
 class TestParseResult:
-    def test_result_with_cost(self) -> None:
+    def test_result_with_cost_and_text(self) -> None:
+        """Result message normally carries both cost and text — both must be emitted."""
         line = json.dumps(
             {
                 "type": "result",
@@ -40,21 +41,36 @@ class TestParseResult:
             }
         )
         parsed = parse_stream_json_line(line)
-        assert parsed is not None
+        assert isinstance(parsed, list)
+        assert len(parsed) == 2
+
+        cost_event = parsed[0]
+        assert cost_event["type"] == "cost"
+        assert cost_event["cost_usd"] == 0.015
+        assert cost_event["input_tokens"] == 500
+        assert cost_event["output_tokens"] == 200
+        assert cost_event["cache_read_tokens"] == 100
+        assert cost_event["cache_write_tokens"] == 50
+        assert cost_event["duration_ms"] == 8500
+        assert cost_event["session_id"] == "abc-123"
+
+        text_event = parsed[1]
+        assert text_event["type"] == "text"
+        assert text_event["source"] == "result"
+        assert text_event["content"] == "done"
+
+    def test_result_cost_only_no_text(self) -> None:
+        line = json.dumps({"type": "result", "result": "", "cost_usd": 0.01, "usage": {"input_tokens": 10}})
+        parsed = parse_stream_json_line(line)
+        assert isinstance(parsed, dict)
         assert parsed["type"] == "cost"
-        assert parsed["cost_usd"] == 0.015
-        assert parsed["input_tokens"] == 500
-        assert parsed["output_tokens"] == 200
-        assert parsed["cache_read_tokens"] == 100
-        assert parsed["cache_write_tokens"] == 50
-        assert parsed["duration_ms"] == 8500
-        assert parsed["session_id"] == "abc-123"
 
     def test_result_text_only(self) -> None:
         line = json.dumps({"type": "result", "result": "analysis complete"})
         parsed = parse_stream_json_line(line)
-        assert parsed is not None
+        assert isinstance(parsed, dict)
         assert parsed["type"] == "text"
+        assert parsed["source"] == "result"
         assert parsed["content"] == "analysis complete"
 
     def test_result_empty_text_no_cost(self) -> None:
@@ -71,8 +87,9 @@ class TestParseAssistant:
             }
         )
         parsed = parse_stream_json_line(line)
-        assert parsed is not None
+        assert isinstance(parsed, dict)
         assert parsed["type"] == "text"
+        assert parsed["source"] == "assistant"
         assert parsed["content"] == "analyzing..."
 
     def test_multiple_text_blocks(self) -> None:
@@ -226,8 +243,9 @@ class TestEdgeCases:
         line = json.dumps({"type": "result", "result": "clean text"})
         ansi_line = f"\x1b[32m{line}\x1b[0m"
         parsed = parse_stream_json_line(ansi_line)
-        assert parsed is not None
+        assert isinstance(parsed, dict)
         assert parsed["type"] == "text"
+        assert parsed["source"] == "result"
         assert parsed["content"] == "clean text"
 
 
@@ -305,6 +323,24 @@ class TestParseToolResult:
         parsed = parse_stream_json_line(line)
         assert parsed is not None
         assert parsed["tool_is_error"] is True
+
+
+class TestParseStreamEvent:
+    def test_text_delta_has_delta_source(self) -> None:
+        line = json.dumps(
+            {
+                "type": "stream_event",
+                "event": {
+                    "type": "content_block_delta",
+                    "delta": {"type": "text_delta", "text": "안"},
+                },
+            }
+        )
+        parsed = parse_stream_json_line(line)
+        assert isinstance(parsed, dict)
+        assert parsed["type"] == "text"
+        assert parsed["source"] == "delta"
+        assert parsed["content"] == "안"
 
 
 class TestParseThinking:
@@ -454,3 +490,105 @@ class TestAssistantMixedContent:
         assert len(parsed) == 2
         assert parsed[0]["type"] == "thinking"
         assert parsed[1]["type"] == "text"
+
+
+class TestRealisticStreamAggregation:
+    """Regression: feeding a realistic Korean stream sequence must produce
+    a clean `result` text (no \\n splitting graphemes) while `stream` keeps
+    the noisy concatenation. This mirrors what executor._read_pty_output does."""
+
+    def _aggregate(self, lines: list[str]) -> tuple[str, str]:
+        """Mirror executor's aggregation logic for a sequence of stream-json lines."""
+        result_text = ""
+        stream_parts: list[str] = []
+        for line in lines:
+            parsed = parse_stream_json_line(line)
+            if parsed is None:
+                continue
+            events = parsed if isinstance(parsed, list) else [parsed]
+            for ev in events:
+                if ev.get("type") != "text":
+                    continue
+                content = str(ev["content"])
+                stream_parts.append(content)
+                if ev.get("source") == "result":
+                    result_text = content
+        return result_text, "\n".join(stream_parts)
+
+    def test_korean_deltas_then_assistant_then_result(self) -> None:
+        # Simulate: 4 partial deltas (Korean tokens splitting graphemes),
+        # then an assistant cumulative message, then the final result.
+        deltas = ["안", "녕하세요", "트", "렌드"]
+        lines = [
+            json.dumps(
+                {
+                    "type": "stream_event",
+                    "event": {
+                        "type": "content_block_delta",
+                        "delta": {"type": "text_delta", "text": d},
+                    },
+                }
+            )
+            for d in deltas
+        ]
+        lines.append(
+            json.dumps(
+                {
+                    "type": "assistant",
+                    "message": {
+                        "content": [
+                            {"type": "text", "text": "안녕하세요 트렌드"},
+                        ]
+                    },
+                }
+            )
+        )
+        lines.append(
+            json.dumps(
+                {
+                    "type": "result",
+                    "result": "안녕하세요 트렌드",
+                    "cost_usd": 0.001,
+                    "usage": {"input_tokens": 10, "output_tokens": 5},
+                }
+            )
+        )
+
+        result_text, stream = self._aggregate(lines)
+
+        # `result` must be the clean final text, no \n inside the Korean string.
+        assert result_text == "안녕하세요 트렌드"
+        assert "\n" not in result_text
+
+        # `stream` keeps the noisy concatenation — deltas + assistant + result.
+        assert "안" in stream
+        assert "녕하세요" in stream
+        assert "트" in stream
+        assert "렌드" in stream
+        assert stream.count("안녕하세요 트렌드") == 2  # assistant + result
+
+    def test_no_result_message_yields_empty_result(self) -> None:
+        # Only deltas + assistant — no final result message.
+        lines = [
+            json.dumps(
+                {
+                    "type": "stream_event",
+                    "event": {
+                        "type": "content_block_delta",
+                        "delta": {"type": "text_delta", "text": "partial"},
+                    },
+                }
+            ),
+            json.dumps(
+                {
+                    "type": "assistant",
+                    "message": {"content": [{"type": "text", "text": "intermediate"}]},
+                }
+            ),
+        ]
+        result_text, stream = self._aggregate(lines)
+        # Per design: empty result when no result message arrived (option B).
+        assert result_text == ""
+        # Stream still has everything we saw.
+        assert "partial" in stream
+        assert "intermediate" in stream

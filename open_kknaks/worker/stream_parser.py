@@ -19,7 +19,7 @@ def parse_stream_json_line(line: str) -> dict[str, Any] | list[dict[str, Any]] |
     """Parse a single stream-json line from Claude Code CLI.
 
     Returns one of:
-        {"type": "text", "content": str}
+        {"type": "text", "source": "result" | "assistant" | "delta", "content": str}
         {"type": "cost", "cost_usd": float, "input_tokens": int, ...}
         {"type": "retry", "error": str, "error_status": int | None, ...}
         {"type": "tool_use", "tool_name": str, "tool_input": dict}
@@ -27,8 +27,14 @@ def parse_stream_json_line(line: str) -> dict[str, Any] | list[dict[str, Any]] |
         {"type": "thinking", "content": str}
         {"type": "init", "model": str, "session_id": str}
         {"type": "progress", "total_tokens": int, "tool_uses": int, ...}
-        list[dict] — when an assistant message contains multiple content blocks
+        list[dict] — when a message yields multiple events (e.g., result with cost+text,
+                     or assistant with multiple content blocks)
         None — line to ignore (empty, malformed, or unrecognized type)
+
+    Text event sources:
+        - "result"    final result message text (last one wins downstream)
+        - "assistant" intermediate assistant message text (cumulative)
+        - "delta"     stream_event partial chunk (token-level, may break mid-grapheme)
 
     Raises:
         BillingError: On billing_error (HTTP 402)
@@ -54,22 +60,31 @@ def parse_stream_json_line(line: str) -> dict[str, Any] | list[dict[str, Any]] |
         cost_usd = obj.get("cost_usd")
         usage = obj.get("usage", {})
 
+        result_events: list[dict[str, Any]] = []
+
         # Cost info (always emit if present)
         if cost_usd is not None or usage:
-            return {
-                "type": "cost",
-                "cost_usd": cost_usd or 0.0,
-                "input_tokens": usage.get("input_tokens", 0),
-                "output_tokens": usage.get("output_tokens", 0),
-                "cache_read_tokens": usage.get("cache_read_tokens", 0),
-                "cache_write_tokens": usage.get("cache_write_tokens", 0),
-                "duration_ms": obj.get("duration_ms", 0),
-                "session_id": obj.get("session_id"),
-            }
+            result_events.append(
+                {
+                    "type": "cost",
+                    "cost_usd": cost_usd or 0.0,
+                    "input_tokens": usage.get("input_tokens", 0),
+                    "output_tokens": usage.get("output_tokens", 0),
+                    "cache_read_tokens": usage.get("cache_read_tokens", 0),
+                    "cache_write_tokens": usage.get("cache_write_tokens", 0),
+                    "duration_ms": obj.get("duration_ms", 0),
+                    "session_id": obj.get("session_id"),
+                }
+            )
 
-        # Text result
+        # Text result — emitted alongside cost when present (the result message
+        # carries both in normal Claude CLI output)
         if isinstance(result_text, str) and result_text.strip():
-            return {"type": "text", "content": result_text.strip()}
+            result_events.append({"type": "text", "source": "result", "content": result_text.strip()})
+
+        if not result_events:
+            return None
+        return result_events[0] if len(result_events) == 1 else result_events
 
     # --- Assistant message (intermediate output) ---
     elif msg_type == "assistant":
@@ -81,7 +96,7 @@ def parse_stream_json_line(line: str) -> dict[str, Any] | list[dict[str, Any]] |
                 if block_type == "text":
                     text = block.get("text", "")
                     if text:
-                        events.append({"type": "text", "content": text})
+                        events.append({"type": "text", "source": "assistant", "content": text})
                 elif block_type == "tool_use":
                     events.append(
                         {
@@ -95,7 +110,7 @@ def parse_stream_json_line(line: str) -> dict[str, Any] | list[dict[str, Any]] |
                     if text:
                         events.append({"type": "thinking", "content": text})
             elif isinstance(block, str) and block:
-                events.append({"type": "text", "content": block})
+                events.append({"type": "text", "source": "assistant", "content": block})
         if not events:
             return None
         return events[0] if len(events) == 1 else events
@@ -163,7 +178,7 @@ def parse_stream_json_line(line: str) -> dict[str, Any] | list[dict[str, Any]] |
             if delta_type == "text_delta":
                 text = delta.get("text", "")
                 if text:
-                    return {"type": "text", "content": text}
+                    return {"type": "text", "source": "delta", "content": text}
             elif delta_type == "thinking_delta":
                 text = delta.get("thinking", "") or delta.get("text", "")
                 if text:

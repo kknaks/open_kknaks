@@ -54,7 +54,7 @@ class TestLoggingMiddleware:
     async def test_logs_on_success(self, broker: RedisBroker) -> None:
         mw = LoggingMiddleware()
         task = Task(prompt="test")
-        result = TaskResult(output="done", exit_code=0)
+        result = TaskResult(result="done", exit_code=0)
         await mw.before_process(broker, task)
         await mw.after_process(broker, task, result=result, exception=None)
 
@@ -129,7 +129,7 @@ class TestRetriesMiddleware:
     async def test_no_retry_on_success(self, broker: RedisBroker) -> None:
         mw = RetriesMiddleware()
         task = Task(prompt="ok", queue="default")
-        result = TaskResult(output="done")
+        result = TaskResult(result="done")
         await mw.after_process(broker, task, result=result, exception=None)
         assert task.retry_count == 0
 
@@ -176,7 +176,7 @@ class TestCostMiddleware:
         mw = CostMiddleware()
         task = Task(prompt="test", queue="default")
         usage = TokenUsage(cost_usd=0.05)
-        result = TaskResult(output="done", usage=usage)
+        result = TaskResult(result="done", usage=usage)
         await mw.after_process(broker, task, result=result, exception=None)
 
         assert mw._worker_spent == 0.05
@@ -247,7 +247,7 @@ class TestRateLimitMiddleware:
         mw = RateLimitMiddleware(max_per_minute=60, recovery_factor=1.05)
         mw._current_rpm = 30.0  # Reduced
         task = Task(prompt="test")
-        result = TaskResult(output="ok")
+        result = TaskResult(result="ok")
         await mw.after_process(broker, task, result=result, exception=None)
         assert mw._current_rpm > 30.0
 
@@ -262,7 +262,7 @@ class TestCallbackMiddleware:
 
         mw = CallbackMiddleware(on_success=on_success)
         task = Task(prompt="test")
-        result = TaskResult(output="done")
+        result = TaskResult(result="done")
         await mw.after_process(broker, task, result=result, exception=None)
         assert len(results) == 1
 
@@ -290,7 +290,7 @@ class TestCallbackMiddleware:
 
         mw = CallbackMiddleware(on_success=bad_callback)
         task = Task(prompt="test")
-        result = TaskResult(output="done")
+        result = TaskResult(result="done")
         # Should not raise
         await mw.after_process(broker, task, result=result, exception=None)
 

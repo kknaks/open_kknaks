@@ -305,7 +305,7 @@ class ClaudeWorker:
             )
 
             # Check exit code
-            task.result = result.output
+            task.result = result.result
             task.exit_code = result.exit_code
             task.result_session_id = result.session_id
             task.usage = result.usage
@@ -313,10 +313,14 @@ class ClaudeWorker:
 
             if result.exit_code != 0:
                 task.status = TaskStatus.FAILED
+                # Prefer the full stream for error context — when the process
+                # crashes the result text is usually empty, but stream may carry
+                # partial assistant output or error messages from the CLI.
+                error_context = result.stream.strip() or result.result.strip()
                 task.error = (
-                    result.output[:500]
-                    if result.output.strip()
-                    else (f"Process exited with code {result.exit_code} (empty output)")
+                    error_context[:500]
+                    if error_context
+                    else f"Process exited with code {result.exit_code} (empty output)"
                 )
                 logger.error(
                     "task.failed",

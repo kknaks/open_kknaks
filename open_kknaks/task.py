@@ -79,11 +79,19 @@ class StreamEvent(BaseModel):
 
 
 class TaskResult(BaseModel):
-    """Internal result returned by the PTY executor."""
+    """Internal result returned by the PTY executor.
+
+    `result` is the final assistant text from the result message — the value
+    most callers want. `stream` is the full concatenation of every text event
+    seen during execution (delta + assistant + result) and is intended for
+    debugging or for callers that need the raw narration. The two are
+    intentionally separate because partial deltas can split mid-grapheme.
+    """
 
     model_config = ConfigDict(use_enum_values=True)
 
-    output: str = ""
+    result: str = ""
+    stream: str = ""
     exit_code: int = 0
     session_id: str | None = None
     usage: TokenUsage | None = None
