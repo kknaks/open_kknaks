@@ -9,11 +9,26 @@
       "Bash(redis-cli *)",
       "Bash(docker compose *)",
       "Bash(git *)",
+      "Bash(gh *)",
       "Bash(python -c *)",
       "Bash(ls *)",
       "Bash(which *)",
-      "Bash(mkdir *)"
+      "Bash(mkdir *)",
+      "Bash(bash .claude/skills/release/scripts/*)"
     ]
   },
-  "enableAllProjectMcpServers": true
+  "enableAllProjectMcpServers": true,
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": ".claude/skills/release/scripts/pre_tag_hook.sh"
+          }
+        ]
+      }
+    ]
+  }
 }
