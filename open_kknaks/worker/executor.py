@@ -181,8 +181,12 @@ class ClaudeCodeExecutor:
             for d in config.add_dirs:
                 cmd.extend(["--add-dir", d])
 
-        # Prompt is the last argument
-        cmd.append(task.prompt)
+        # Prompt is the last positional argument. `--` terminates option parsing so
+        # variadic options earlier in the command (notably `--mcp-config <configs...>`,
+        # `--allowedTools <tools...>`, `--add-dir <dirs...>`) cannot absorb the prompt
+        # token. Without this, calls like `--mcp-config /tmp/cfg.json "hello"` make
+        # the CLI treat "hello" as a second mcp config path → file-not-found error.
+        cmd.extend(["--", task.prompt])
 
         return cmd
 

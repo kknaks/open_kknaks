@@ -4,6 +4,12 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **variadic 옵션이 prompt 토큰을 흡수하던 버그 수정.** claude CLI 의 `--mcp-config <configs...>`, `--allowedTools <tools...>`, `--add-dir <dirs...>` 는 모두 variadic 이라, 그 중 하나가 build 결과의 마지막 옵션이면 그 다음에 박힌 positional prompt 가 옵션 인자로 흡수되었습니다. 예: `--mcp-config /tmp/cfg.json "안녕"` → CLI 가 `"안녕"` 을 두 번째 mcp config path 로 해석 → `MCP config file not found: /app/안녕` 에러. executor 가 prompt 박기 직전 `--` 를 박아 option parsing 을 종료하므로 어떤 variadic 옵션이 마지막에 와도 prompt 가 분리됩니다.
+
 ## [2.0.0] — 2026-04-30
 
 ### Breaking

@@ -16,6 +16,27 @@ class TestBuildCommand:
         assert "--output-format" in cmd
         assert "stream-json" in cmd
         assert cmd[-1] == "hello"
+        # `--` must terminate option parsing right before the prompt so variadic
+        # options (e.g. `--mcp-config <configs...>`) cannot absorb the prompt token.
+        assert cmd[-2] == "--"
+
+    def test_prompt_after_double_dash_with_mcp_config(self) -> None:
+        """Regression — `--mcp-config <configs...>` is variadic in claude CLI.
+
+        Without `--` before the prompt, calls like `--mcp-config /tmp/cfg.json "prompt"`
+        make the CLI treat the prompt as a second mcp config path → file-not-found.
+        """
+        executor = ClaudeCodeExecutor()
+        task = Task(prompt="안녕")
+        config = ClaudeConfig(mcp_config="/tmp/mcp-config.json")
+        cmd = executor._build_command(task, config)
+        mcp_idx = cmd.index("--mcp-config")
+        dd_idx = cmd.index("--")
+        # ordering: --mcp-config <path> ... -- <prompt>
+        assert mcp_idx < dd_idx
+        assert dd_idx == len(cmd) - 2
+        assert cmd[mcp_idx + 1] == "/tmp/mcp-config.json"
+        assert cmd[-1] == "안녕"
 
     def test_with_model(self) -> None:
         executor = ClaudeCodeExecutor()
