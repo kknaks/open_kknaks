@@ -1,5 +1,7 @@
 """Tests for Typer CLI surfaces."""
 
+import re
+
 from typer.testing import CliRunner
 
 from open_kknaks.cli.main import app
@@ -21,10 +23,14 @@ class FakeBroker:
         return self.task if task_id == "task-1" else None
 
 
+def strip_ansi(value: str) -> str:
+    return re.sub(r"\x1b\[[0-9;]*m", "", value)
+
+
 def test_worker_run_has_provider_option() -> None:
     result = CliRunner().invoke(app, ["worker", "run", "--help"])
     assert result.exit_code == 0
-    assert "--provider" in result.output
+    assert "--provider" in strip_ansi(result.output)
 
 
 def test_worker_run_rejects_unknown_provider() -> None:
