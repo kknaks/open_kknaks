@@ -30,16 +30,36 @@
 </head>
 <body>
     <h1>open_kknaks</h1>
-    <p style="color:#888; margin-top:0;">PTY-based Claude Code task queue</p>
+    <p style="color:#888; margin-top:0;">Provider-based headless agent task queue</p>
 
     <div id="status-bar">
         <span>Redis: <span id="redis-badge" class="badge badge-err">checking...</span></span>
         <span>Claude: <span id="claude-badge" class="badge badge-err">checking...</span></span>
+        <span>Codex: <span id="codex-badge" class="badge badge-err">checking...</span></span>
         <span>Workers: <span id="worker-badge" class="badge badge-info">-</span></span>
         <span>Queues: <span id="queues-info" style="color:#aaa">-</span></span>
     </div>
     <div id="worker-detail" style="font-size:12px; color:#888; margin-bottom:16px;"></div>
 
+    <div style="display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin-bottom:8px;">
+        <label>Provider
+            <select id="provider">
+                <option value="claude">claude</option>
+                <option value="codex">codex</option>
+            </select>
+        </label>
+        <label>Model
+            <input id="model" placeholder="provider default" style="width:180px;">
+        </label>
+        <label>cwd
+            <input id="cwd" placeholder="/project" style="width:220px;">
+        </label>
+        <label>timeout
+            <input id="timeoutSec" type="number" min="1" placeholder="600" style="width:80px;">
+        </label>
+    </div>
+    <textarea id="providerOptions" placeholder='provider_options JSON, e.g. {"sandbox":"workspace-write","color":"never"}' style="height:52px;"></textarea>
+    <br>
     <textarea id="prompt" placeholder="Enter your prompt..."></textarea>
     <br>
     <button onclick="submitStream()">Submit (Streaming)</button>
@@ -78,6 +98,10 @@
             claudeBadge.textContent = h.claude;
             claudeBadge.className = 'badge ' + (h.claude === 'connected' ? 'badge-ok' : h.claude === 'partial' ? 'badge-info' : 'badge-err');
 
+            const codexBadge = document.getElementById('codex-badge');
+            codexBadge.textContent = h.codex;
+            codexBadge.className = 'badge ' + (h.codex === 'connected' ? 'badge-ok' : h.codex === 'partial' ? 'badge-info' : 'badge-err');
+
             const workerBadge = document.getElementById('worker-badge');
             workerBadge.textContent = h.worker_count;
             workerBadge.className = 'badge ' + (h.worker_count > 0 ? 'badge-ok' : 'badge-err');
@@ -87,13 +111,38 @@
 
             // Worker detail
             const detail = h.workers.map(w =>
-                `${w.id}: claude=${w.claude} ${w.claude_version} [${w.queues.join(',')}]`
+                `${w.id}: claude=${w.claude} ${w.claude_version} codex=${w.codex} ${w.codex_version} [${w.queues.join(',')}]`
             ).join('<br>');
             document.getElementById('worker-detail').innerHTML = detail;
         } catch {
             document.getElementById('redis-badge').textContent = 'error';
             document.getElementById('redis-badge').className = 'badge badge-err';
         }
+    }
+
+    function submitPayload(task) {
+        const provider = document.getElementById('provider').value;
+        const model = document.getElementById('model').value.trim();
+        const cwd = document.getElementById('cwd').value.trim();
+        const timeoutSec = document.getElementById('timeoutSec').value.trim();
+        const options = {};
+        if (cwd) options.cwd = cwd;
+        if (timeoutSec) options.timeout_sec = Number(timeoutSec);
+
+        let providerOptions = {};
+        const providerOptionsRaw = document.getElementById('providerOptions').value.trim();
+        if (providerOptionsRaw) providerOptions = JSON.parse(providerOptionsRaw);
+        if (provider === 'codex') {
+            providerOptions = {sandbox: 'workspace-write', color: 'never', skip_git_repo_check: true, ...providerOptions};
+        }
+
+        return {
+            ...task,
+            provider,
+            model: model || null,
+            options,
+            provider_options: providerOptions,
+        };
     }
     checkHealth();
     setInterval(checkHealth, 5000);
@@ -107,7 +156,7 @@
         const res = await fetch('/submit', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({prompt}),
+            body: JSON.stringify(submitPayload({prompt})),
         });
         const {task_id} = await res.json();
         taskStatus.textContent = `${task_id} - streaming...`;
@@ -120,8 +169,12 @@
         evtSource.addEventListener('retry', e => {
             output.textContent += `\n[RETRY] ${e.data}\n`;
         });
-        evtSource.addEventListener('done', () => {
-            taskStatus.textContent = `${task_id} - done`;
+        evtSource.addEventListener('done', e => {
+            const final = e.data ? JSON.parse(e.data) : {status: 'done'};
+            taskStatus.textContent = `${task_id} - ${final.status}`;
+            if (!output.textContent.trim() && (final.result || final.error)) {
+                output.textContent = final.result || `[ERROR] ${final.error}`;
+            }
             evtSource.close();
             checkHealth();
         });
@@ -140,7 +193,7 @@
         const res = await fetch('/submit', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({prompt}),
+            body: JSON.stringify(submitPayload({prompt})),
         });
         const {task_id} = await res.json();
         taskStatus.textContent = `${task_id} - waiting...`;
@@ -198,7 +251,7 @@
             const res = await fetch('/submit', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify(tasks[0]),
+                body: JSON.stringify(submitPayload(tasks[0])),
             });
             const {task_id} = await res.json();
             taskStatus.textContent = `${task_id} - streaming...`;
@@ -207,8 +260,12 @@
                 output.textContent += e.data;
                 output.scrollTop = output.scrollHeight;
             });
-            evtSource.addEventListener('done', () => {
-                taskStatus.textContent = `${task_id} - done`;
+            evtSource.addEventListener('done', e => {
+                const final = e.data ? JSON.parse(e.data) : {status: 'done'};
+                taskStatus.textContent = `${task_id} - ${final.status}`;
+                if (!output.textContent.trim() && (final.result || final.error)) {
+                    output.textContent = final.result || `[ERROR] ${final.error}`;
+                }
                 evtSource.close();
                 checkHealth();
             });
@@ -221,7 +278,7 @@
                 const res = await fetch('/submit', {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify(t),
+                    body: JSON.stringify(submitPayload(t)),
                 });
                 const {task_id} = await res.json();
                 ids.push({id: task_id, label: t.label || t.queue || 'default'});
@@ -238,7 +295,10 @@
                         output.textContent += e.data;
                         output.scrollTop = output.scrollHeight;
                     });
-                    evtSource.addEventListener('done', () => {
+                    evtSource.addEventListener('done', e => {
+                        const final = e.data ? JSON.parse(e.data) : {status: 'done'};
+                        if (final.error) output.textContent += `\n[ERROR] ${final.error}\n`;
+                        else if (final.result && !output.textContent.includes(final.result)) output.textContent += final.result;
                         output.textContent += '\n';
                         doneCount++;
                         taskStatus.textContent = `${doneCount}/${ids.length} done`;

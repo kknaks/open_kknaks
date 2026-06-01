@@ -2,7 +2,16 @@
 
 from datetime import datetime, timezone
 
+from open_kknaks.constants import DEFAULT_PROVIDER, PROVIDER_CLAUDE, PROVIDER_CODEX, SUPPORTED_PROVIDERS
 from open_kknaks.task import Priority, StreamEvent, Task, TaskResult, TaskStatus, TokenUsage
+
+
+class TestProviderConstants:
+    def test_values(self) -> None:
+        assert PROVIDER_CLAUDE == "claude"
+        assert PROVIDER_CODEX == "codex"
+        assert DEFAULT_PROVIDER == "claude"
+        assert frozenset({"claude", "codex"}) == SUPPORTED_PROVIDERS
 
 
 class TestTaskStatus:
@@ -132,6 +141,9 @@ class TestTask:
         assert task.status == "pending"
         assert task.priority == 5
         assert task.queue == "default"
+        assert task.provider == "claude"
+        assert task.options == {}
+        assert task.provider_options == {}
         assert task.id  # uuid generated
 
     def test_enum_values_serialized(self) -> None:
@@ -149,7 +161,10 @@ class TestTask:
             prompt="test prompt",
             status=TaskStatus.RUNNING,
             priority=Priority.HIGH,
+            provider="codex",
             model="opus",
+            options={"cwd": "/repo", "resume": {"mode": "new"}},
+            provider_options={"sandbox": "workspace-write"},
             max_retries=3,
             metadata={"key": "value", "count": 42},
         )
@@ -158,7 +173,10 @@ class TestTask:
         assert restored.prompt == task.prompt
         assert restored.status == "running"
         assert restored.priority == 1
+        assert restored.provider == "codex"
         assert restored.model == "opus"
+        assert restored.options == {"cwd": "/repo", "resume": {"mode": "new"}}
+        assert restored.provider_options == {"sandbox": "workspace-write"}
         assert restored.max_retries == 3
         assert restored.metadata == {"key": "value", "count": 42}
         assert restored.created_at == task.created_at
@@ -191,14 +209,8 @@ class TestTask:
         assert task.context is None
         assert task.model is None
         assert task.delay_until is None
-        assert task.allowed_tools is None
         assert task.result is None
         assert task.usage is None
-
-    def test_list_fields(self) -> None:
-        task = Task(prompt="test", allowed_tools=["bash", "read"], add_dirs=["/tmp"])
-        assert task.allowed_tools == ["bash", "read"]
-        assert task.add_dirs == ["/tmp"]
 
     def test_metadata_default_empty(self) -> None:
         task = Task(prompt="test")

@@ -1,15 +1,15 @@
 # open-kknaks
 
-PTY 기반 Claude Code CLI 태스크 큐 라이브러리.
+Claude/Codex provider 기반 headless agent 태스크 큐 라이브러리.
 
-프로듀서(ClaudeClient)가 Redis에 태스크를 넣으면, 워커(ClaudeWorker)가 PTY로 Claude Code CLI를 실행하고 결과를 돌려줍니다.
+프로듀서(`AgentClient`)가 Redis에 태스크를 넣으면, 워커(`ClaudeWorker`)가 provider adapter를 통해 Claude Code CLI 또는 Codex CLI를 실행하고 결과를 돌려줍니다.
 
 ```
-ClaudeClient --enqueue--> Redis <--dequeue-- ClaudeWorker
-                                                  |
-                                             PTY Executor
-                                                  |
-                                             claude -p ...
+AgentClient --enqueue--> Redis <--dequeue-- ClaudeWorker
+                                                 |
+                                         Provider Adapter
+                                                 |
+                                      claude -p / codex exec
 ```
 
 ## 설치
@@ -22,20 +22,30 @@ pip install open-kknaks
 
 ## 라이브러리 사용법
 
-### 태스크 제출 (ClaudeClient)
+### 태스크 제출 (AgentClient)
 
 ```python
 import asyncio
-from open_kknaks import RedisBroker, ClaudeClient
+from open_kknaks import AgentClient, RedisBroker
 
 async def main():
     broker = RedisBroker(url="redis://localhost:6379", namespace="myapp")
     await broker.connect()
-    client = ClaudeClient(broker=broker)
+    client = AgentClient(broker=broker)
 
-    # 태스크 제출
+    # Claude가 기본 provider다.
     task_id = await client.submit("Explain Python decorators in 3 sentences.")
     print(f"Submitted: {task_id}")
+
+    # Codex provider로 실행할 수도 있다.
+    codex_task_id = await client.submit(
+        "Summarize this repository structure.",
+        provider="codex",
+        model="gpt-5",
+        options={"cwd": "/path/to/repo", "timeout_sec": 300},
+        provider_options={"sandbox": "workspace-write", "color": "never"},
+    )
+    print(f"Codex submitted: {codex_task_id}")
 
     # 결과 대기
     task = await client.result(task_id, timeout=120)
@@ -54,16 +64,12 @@ asyncio.run(main())
 | `context` | 프롬프트 앞에 붙는 추가 컨텍스트 |
 | `queue` | 큐 이름 (기본: `"default"`) |
 | `priority` | `Priority.HIGH(1)`, `NORMAL(5)`, `LOW(9)` |
-| `model` | 모델 오버라이드 (예: `"claude-sonnet-4-5-20250514"`) |
-| `max_turns` | 에이전트 턴 수 제한 |
+| `provider` | 실행 provider. 기본 `"claude"`, 지원값 `"claude"`, `"codex"` |
+| `model` | provider 모델 오버라이드 |
+| `options` | 공통 실행 옵션. 예: `cwd`, `timeout_sec`, `resume` |
+| `provider_options` | provider별 CLI 옵션. 예: Claude `max_turns`, Codex `sandbox` |
 | `max_retries` | 실패 시 재시도 횟수 |
 | `delay_seconds` | 지연 실행 (초) |
-| `timeout` | 최대 실행 시간 (초) |
-| `session_id` | 이전 세션 이어서 실행 |
-| `system_prompt` | 시스템 프롬프트 교체 |
-| `append_system_prompt` | 시스템 프롬프트에 추가 |
-| `allowed_tools` | 허용 도구 목록 |
-| `disallowed_tools` | 차단 도구 목록 |
 | `metadata` | 사용자 정의 메타데이터 |
 
 #### 실시간 스트리밍
@@ -266,35 +272,43 @@ open-kknaks dlq retry <queue-name> --task-id <id>
 open-kknaks dlq purge <queue-name>
 ```
 
-## 예제 실행
+## Docker 데모 실행
 
-`examples/` 디렉토리에 Docker Compose 기반 데모가 포함되어 있습니다.
+`examples/` 디렉토리에 Docker Compose 기반 데모와 provider E2E 시나리오가 포함되어 있습니다.
+PyPI 설치 후 동작을 확인하거나 처음 연동을 검증할 때는 GitHub repository를 clone한 뒤 이 흐름을 먼저 권장합니다.
 
 ### 구성
 
 - **Redis** - 태스크 큐 브로커
-- **Worker** - Claude Code CLI를 PTY로 실행하는 워커
-- **App** - FastAPI 웹 UI (태스크 제출, 스트리밍, 시나리오)
+- **Worker** - Claude/Codex provider adapter를 실행하는 워커
+- **App** - FastAPI 웹 UI (provider 선택, 태스크 제출, 스트리밍, 시나리오)
 
 ### 사전 준비
 
 - Docker, Docker Compose
-- Node.js (Claude Code CLI 설치용)
-- Claude Code OAuth 토큰 (`claude setup-token`으로 확인)
+- Node.js/npm (Claude Code CLI 설치용)
+- Claude provider를 쓰려면 호스트에서 `claude setup-token`을 실행해 Claude Code setup token을 준비합니다.
+- Codex provider를 쓰려면 호스트에서 Codex CLI 로그인을 완료해 `~/.codex`가 준비되어 있어야 합니다.
+
+> `CLAUDE_CODE_OAUTH_TOKEN`에는 Anthropic Console API key가 아니라 `claude setup-token` 출력값을 넣어야 합니다.
 
 ### 실행
 
 ```bash
+git clone https://github.com/kknaks/open_kknaks.git
+cd open_kknaks
 cd examples/
 bash setup.sh
 ```
 
 `setup.sh`가 다음을 자동으로 처리합니다:
 
-1. Claude OAuth 토큰 입력
+1. Claude Code setup token 입력
 2. Linux용 Node.js 다운로드 (Docker 컨테이너용)
 3. Claude Code CLI 설치 (npm)
-4. `.env` 생성 + Docker Compose 실행
+4. Codex CLI를 Docker/Linux용으로 `examples/.codex-tools/`에 설치
+5. 호스트 `~/.codex` 인증/config를 `examples/.codex-home/`으로 복사
+6. `.env` 생성 + Docker Compose 실행
 
 완료되면:
 
@@ -302,9 +316,72 @@ bash setup.sh
 - **Swagger**: http://localhost:8000/docs
 - **Redis**: localhost:6379
 
+웹 UI에서 provider를 `claude` 또는 `codex`로 선택하고, 필요하면 `model`, `cwd`, `timeout`, `provider_options` JSON을 지정합니다.
+Codex 선택 시 UI는 기본 provider option으로 `{"sandbox":"workspace-write","color":"never","skip_git_repo_check":true}`를 적용합니다.
+
+### 수동 Docker 실행
+
+이미 `setup.sh`를 한 번 실행해서 `.env`, `.claude-tools/`, `.codex-tools/`, `.codex-home/`이 준비되어 있다면 다음 명령으로 다시 띄울 수 있습니다.
+
+```bash
+cd examples/
+docker compose up -d --build
+```
+
+로컬 checkout의 최신 코드를 Docker 데모에 바로 반영하려면 local override를 함께 사용합니다.
+
+```bash
+cd examples/
+docker compose -f docker-compose.yml -f docker-compose.local.yml up -d --build
+```
+
+토큰이나 인증 파일을 바꾼 뒤에는 worker를 재생성해야 합니다.
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.local.yml up -d --force-recreate worker
+```
+
+상태와 로그는 다음으로 확인합니다.
+
+```bash
+docker compose ps
+docker compose logs --tail=100 worker
+```
+
+worker 로그에서 `provider.check`가 `claude=ok`, `codex=ok`로 표시되면 CLI 바이너리 감지는 완료된 상태입니다.
+실제 인증 실패는 task 실행 시 `401 Invalid bearer token` 같은 provider 에러로 반환되며, 웹 UI 출력 영역에도 표시됩니다.
+
+### 수동 E2E 절차
+
+Redis와 worker가 실행 중인 상태에서 provider별로 실제 queue -> worker -> provider -> result 흐름을 확인합니다.
+
+```bash
+# Claude 기본 provider
+python examples/scenarios/01_basic.py
+
+# Codex provider
+OPEN_KKNAKS_PROVIDER=codex \
+OPEN_KKNAKS_MODEL=gpt-5 \
+OPEN_KKNAKS_CWD=/path/to/open_kknaks \
+python examples/scenarios/01_basic.py
+
+# Codex 세션 이어가기
+OPEN_KKNAKS_PROVIDER=codex \
+OPEN_KKNAKS_CWD=/path/to/open_kknaks \
+python examples/scenarios/05_session.py
+```
+
+추가 옵션은 환경변수로 줄 수 있습니다.
+
+```bash
+OPEN_KKNAKS_TIMEOUT_SEC=300
+OPEN_KKNAKS_PROVIDER_OPTIONS='{"sandbox":"workspace-write","color":"never"}'
+OPEN_KKNAKS_CODEX_SANDBOX=workspace-write
+```
+
 ### 시나리오 스크립트
 
-Docker 없이 개별 시나리오를 직접 실행할 수도 있습니다 (Redis + Worker가 실행 중이어야 합니다):
+Docker 없이 개별 시나리오를 직접 실행할 수도 있습니다. Redis + Worker가 실행 중이어야 하며, provider CLI 인증은 실행 환경에서 완료되어 있어야 합니다.
 
 ```bash
 pip install -r examples/requirements.txt

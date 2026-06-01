@@ -158,16 +158,16 @@ class TestTimeoutMiddleware:
     async def test_sets_default_timeout(self, broker: RedisBroker) -> None:
         mw = TimeoutMiddleware(default_timeout=120)
         task = Task(prompt="test")
-        assert task.timeout is None
+        assert "timeout_sec" not in task.options
         await mw.before_process(broker, task)
-        assert task.timeout == 120
+        assert task.options["timeout_sec"] == 120
 
     @pytest.mark.asyncio
     async def test_respects_existing_timeout(self, broker: RedisBroker) -> None:
         mw = TimeoutMiddleware(default_timeout=120)
-        task = Task(prompt="test", timeout=60)
+        task = Task(prompt="test", options={"timeout_sec": 60})
         await mw.before_process(broker, task)
-        assert task.timeout == 60
+        assert task.options["timeout_sec"] == 60
 
 
 class TestCostMiddleware:

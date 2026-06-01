@@ -19,9 +19,12 @@ services:
         condition: service_healthy
     env_file: .env
     environment:
-      - PATH=/claude-tools/node/bin:/claude-tools/node_modules/.bin:/usr/local/bin:/usr/bin:/bin
+      - PATH=/codex-tools/node_modules/.bin:/claude-tools/node/bin:/claude-tools/node_modules/.bin:/usr/local/bin:/usr/bin:/bin
+      - CODEX_HOME=/codex-home
     volumes:
       - ./.claude-tools:/claude-tools:ro
+      - ./.codex-tools:/codex-tools:ro
+      - ./.codex-home:/codex-home
 
   app:
     build:

@@ -1,11 +1,11 @@
-"""Integration tests for ClaudeClient."""
+"""Integration tests for AgentClient."""
 
 import pytest
 import pytest_asyncio
 from fakeredis import aioredis as fake_aioredis
 
 from open_kknaks.broker.redis import RedisBroker
-from open_kknaks.client import ClaudeClient
+from open_kknaks.client import AgentClient
 from open_kknaks.task import Priority, TaskStatus
 
 
@@ -20,13 +20,13 @@ async def broker():
 
 
 @pytest.fixture
-def client(broker: RedisBroker) -> ClaudeClient:
-    return ClaudeClient(broker=broker)
+def client(broker: RedisBroker) -> AgentClient:
+    return AgentClient(broker=broker)
 
 
 class TestSubmit:
     @pytest.mark.asyncio
-    async def test_submit_returns_task_id(self, client: ClaudeClient) -> None:
+    async def test_submit_returns_task_id(self, client: AgentClient) -> None:
         task_id = await client.submit("hello world")
         assert isinstance(task_id, str)
         assert len(task_id) > 0
@@ -34,7 +34,7 @@ class TestSubmit:
     @pytest.mark.asyncio
     async def test_submit_creates_task_in_broker(
         self,
-        client: ClaudeClient,
+        client: AgentClient,
         broker: RedisBroker,
     ) -> None:
         task_id = await client.submit("test prompt", queue="myqueue")
@@ -42,11 +42,12 @@ class TestSubmit:
         assert task is not None
         assert task.prompt == "test prompt"
         assert task.queue == "myqueue"
+        assert task.provider == "claude"
 
     @pytest.mark.asyncio
     async def test_submit_with_priority(
         self,
-        client: ClaudeClient,
+        client: AgentClient,
         broker: RedisBroker,
     ) -> None:
         task_id = await client.submit("high priority", priority=Priority.HIGH)
@@ -55,29 +56,31 @@ class TestSubmit:
         assert task.priority == 1
 
     @pytest.mark.asyncio
-    async def test_submit_with_overrides(
+    async def test_submit_with_provider_fields(
         self,
-        client: ClaudeClient,
+        client: AgentClient,
         broker: RedisBroker,
     ) -> None:
         task_id = await client.submit(
             "test",
+            provider="codex",
             model="opus",
-            effort="high",
-            max_turns=5,
+            options={"cwd": "/repo", "resume": {"mode": "new"}},
+            provider_options={"sandbox": "workspace-write", "color": "never"},
             metadata={"key": "value"},
         )
         task = await broker.get_task(task_id)
         assert task is not None
+        assert task.provider == "codex"
         assert task.model == "opus"
-        assert task.effort == "high"
-        assert task.max_turns == 5
+        assert task.options == {"cwd": "/repo", "resume": {"mode": "new"}}
+        assert task.provider_options == {"sandbox": "workspace-write", "color": "never"}
         assert task.metadata == {"key": "value"}
 
     @pytest.mark.asyncio
     async def test_submit_with_delay(
         self,
-        client: ClaudeClient,
+        client: AgentClient,
         broker: RedisBroker,
     ) -> None:
         await client.submit("delayed", delay_seconds=60)
@@ -88,13 +91,13 @@ class TestSubmit:
 
 class TestStatus:
     @pytest.mark.asyncio
-    async def test_status_pending(self, client: ClaudeClient) -> None:
+    async def test_status_pending(self, client: AgentClient) -> None:
         task_id = await client.submit("test")
         status = await client.status(task_id)
         assert status == "pending"
 
     @pytest.mark.asyncio
-    async def test_status_not_found(self, client: ClaudeClient) -> None:
+    async def test_status_not_found(self, client: AgentClient) -> None:
         status = await client.status("nonexistent")
         assert status is None
 
@@ -103,7 +106,7 @@ class TestResult:
     @pytest.mark.asyncio
     async def test_result_already_done(
         self,
-        client: ClaudeClient,
+        client: AgentClient,
         broker: RedisBroker,
     ) -> None:
         task_id = await client.submit("test")
@@ -120,14 +123,14 @@ class TestResult:
         assert result.status == "done"
 
     @pytest.mark.asyncio
-    async def test_result_not_found(self, client: ClaudeClient) -> None:
+    async def test_result_not_found(self, client: AgentClient) -> None:
         result = await client.result("nonexistent", timeout=0.1)
         assert result is None
 
 
 class TestCancel:
     @pytest.mark.asyncio
-    async def test_cancel_existing(self, client: ClaudeClient, broker: RedisBroker) -> None:
+    async def test_cancel_existing(self, client: AgentClient, broker: RedisBroker) -> None:
         task_id = await client.submit("cancel me")
         success = await client.cancel(task_id)
         assert success
@@ -137,7 +140,7 @@ class TestCancel:
         assert task.status == "cancelled"
 
     @pytest.mark.asyncio
-    async def test_cancel_not_found(self, client: ClaudeClient) -> None:
+    async def test_cancel_not_found(self, client: AgentClient) -> None:
         success = await client.cancel("nonexistent")
         assert not success
 

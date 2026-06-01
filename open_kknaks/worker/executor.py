@@ -10,6 +10,7 @@ import struct
 import termios
 import time
 from collections.abc import Awaitable, Callable
+from typing import Any
 
 import structlog
 
@@ -18,7 +19,7 @@ from open_kknaks.exceptions import IdleTimeoutError, TaskTimeoutError
 from open_kknaks.task import StreamEvent, Task, TaskResult, TokenUsage
 from open_kknaks.worker.line_buffer import LineBuffer
 from open_kknaks.worker.pty_process import PTYProcess
-from open_kknaks.worker.stream_parser import parse_stream_json_line
+from open_kknaks.worker.stream_parser import parse_stream_json_line, strip_ansi
 
 logger = structlog.get_logger()
 
@@ -173,8 +174,11 @@ class ClaudeCodeExecutor:
             cmd.append("--dangerously-skip-permissions")
         elif config.permission_mode and config.permission_mode != "default":
             cmd.extend(["--permission-mode", config.permission_mode])
-        if task.session_id:
-            cmd.extend(["--resume", task.session_id])
+        resume = task.options.get("resume")
+        if isinstance(resume, dict) and resume.get("mode") == "session":
+            session_id = resume.get("session_id")
+            if isinstance(session_id, str) and session_id:
+                cmd.extend(["--resume", session_id])
         if config.mcp_config:
             cmd.extend(["--mcp-config", config.mcp_config])
         if config.add_dirs:
@@ -201,11 +205,13 @@ class ClaudeCodeExecutor:
         line_buffer = LineBuffer()
         result_text: str = ""
         stream_parts: list[str] = []
+        debug_lines: list[str] = []
         usage: TokenUsage | None = None
         session_id: str | None = None
         done = asyncio.Event()
 
-        timeout = task.timeout or DEFAULT_TIMEOUT
+        timeout_option = task.options.get("timeout_sec")
+        timeout = timeout_option if isinstance(timeout_option, int) else DEFAULT_TIMEOUT
         deadline = time.monotonic() + timeout
         last_data_time = time.monotonic()
 
@@ -226,6 +232,108 @@ class ClaudeCodeExecutor:
                     done.set()
 
         loop.add_reader(process.master_fd, _on_readable)
+
+        async def _publish(chunk: StreamEvent) -> None:
+            if on_chunk:
+                try:
+                    await on_chunk(chunk)
+                except Exception:
+                    logger.warning("on_chunk callback error", task_id=task.id, exc_info=True)
+
+        async def _handle_event(event_data: dict[str, Any]) -> None:
+            nonlocal result_text, session_id, usage
+
+            event_type = event_data["type"]
+
+            if event_type == "text":
+                content = str(event_data["content"])
+                source = event_data.get("source")
+                stream_parts.append(content)
+                if source == "result":
+                    result_text = content
+                await _publish(StreamEvent(type="text", text=content))
+
+            elif event_type == "cost":
+                usage = TokenUsage(
+                    cost_usd=float(event_data.get("cost_usd", 0) or 0),
+                    input_tokens=int(event_data.get("input_tokens", 0) or 0),
+                    output_tokens=int(event_data.get("output_tokens", 0) or 0),
+                    cache_read_tokens=int(event_data.get("cache_read_tokens", 0) or 0),
+                    cache_write_tokens=int(event_data.get("cache_write_tokens", 0) or 0),
+                    duration_ms=int(event_data.get("duration_ms", 0) or 0),
+                )
+                session_id = event_data.get("session_id") or session_id
+                await _publish(StreamEvent(type="cost", cost_usd=usage.cost_usd))
+
+            elif event_type == "retry":
+                await _publish(
+                    StreamEvent(
+                        type="retry",
+                        retry_info=str(event_data.get("error", "unknown")),
+                    )
+                )
+
+            elif event_type == "tool_use":
+                tool_input = event_data.get("tool_input")
+                await _publish(
+                    StreamEvent(
+                        type="tool_use",
+                        tool_name=event_data.get("tool_name"),
+                        tool_input=tool_input if isinstance(tool_input, dict) else None,
+                    )
+                )
+
+            elif event_type == "tool_result":
+                await _publish(
+                    StreamEvent(
+                        type="tool_result",
+                        tool_result=event_data.get("tool_result"),
+                        tool_is_error=event_data.get("tool_is_error"),
+                    )
+                )
+
+            elif event_type == "thinking":
+                await _publish(
+                    StreamEvent(
+                        type="thinking",
+                        text=str(event_data.get("content", "")),
+                    )
+                )
+
+            elif event_type == "init":
+                session_id = event_data.get("session_id") or session_id
+                await _publish(
+                    StreamEvent(
+                        type="init",
+                        model=event_data.get("model"),
+                        session_id=event_data.get("session_id"),
+                    )
+                )
+
+            elif event_type == "progress":
+                await _publish(
+                    StreamEvent(
+                        type="progress",
+                        total_tokens=event_data.get("total_tokens"),
+                        tool_uses=event_data.get("tool_uses"),
+                        duration_ms=event_data.get("duration_ms"),
+                        description=event_data.get("description"),
+                        last_tool_name=event_data.get("last_tool_name"),
+                    )
+                )
+
+        async def _process_line(line: str) -> None:
+            parsed = parse_stream_json_line(line)
+            if parsed is None:
+                clean = strip_ansi(line.strip())
+                if clean:
+                    debug_lines.append(clean)
+                    del debug_lines[:-20]
+                return
+
+            events_list = parsed if isinstance(parsed, list) else [parsed]
+            for event_data in events_list:
+                await _handle_event(event_data)
 
         try:
             while not done.is_set():
@@ -248,161 +356,16 @@ class ClaudeCodeExecutor:
 
                 # Process buffered lines
                 for line in line_buffer.get_lines():
-                    parsed = parse_stream_json_line(line)
-                    if parsed is None:
-                        continue
-
-                    # Normalize: single dict → list
-                    events_list = parsed if isinstance(parsed, list) else [parsed]
-
-                    for event_data in events_list:
-                        event_type = event_data["type"]
-
-                        if event_type == "text":
-                            content = str(event_data["content"])
-                            source = event_data.get("source")
-                            stream_parts.append(content)
-                            if source == "result":
-                                result_text = content
-                            if on_chunk:
-                                try:
-                                    await on_chunk(StreamEvent(type="text", text=content))
-                                except Exception:
-                                    logger.warning("on_chunk callback error", task_id=task.id, exc_info=True)
-
-                        elif event_type == "cost":
-                            usage = TokenUsage(
-                                cost_usd=float(event_data.get("cost_usd", 0) or 0),
-                                input_tokens=int(event_data.get("input_tokens", 0) or 0),
-                                output_tokens=int(event_data.get("output_tokens", 0) or 0),
-                                cache_read_tokens=int(event_data.get("cache_read_tokens", 0) or 0),
-                                cache_write_tokens=int(event_data.get("cache_write_tokens", 0) or 0),
-                                duration_ms=int(event_data.get("duration_ms", 0) or 0),
-                            )
-                            session_id = event_data.get("session_id") or session_id
-                            if on_chunk:
-                                try:
-                                    await on_chunk(StreamEvent(type="cost", cost_usd=usage.cost_usd))
-                                except Exception:
-                                    logger.warning("on_chunk callback error", task_id=task.id, exc_info=True)
-
-                        elif event_type == "retry":
-                            if on_chunk:
-                                try:
-                                    await on_chunk(
-                                        StreamEvent(
-                                            type="retry",
-                                            retry_info=str(event_data.get("error", "unknown")),
-                                        )
-                                    )
-                                except Exception:
-                                    logger.warning("on_chunk callback error", task_id=task.id, exc_info=True)
-
-                        elif event_type == "tool_use":
-                            if on_chunk:
-                                try:
-                                    await on_chunk(
-                                        StreamEvent(
-                                            type="tool_use",
-                                            tool_name=event_data.get("tool_name"),
-                                            tool_input=event_data.get("tool_input"),
-                                        )
-                                    )
-                                except Exception:
-                                    logger.warning("on_chunk callback error", task_id=task.id, exc_info=True)
-
-                        elif event_type == "tool_result":
-                            if on_chunk:
-                                try:
-                                    await on_chunk(
-                                        StreamEvent(
-                                            type="tool_result",
-                                            tool_result=event_data.get("tool_result"),
-                                            tool_is_error=event_data.get("tool_is_error"),
-                                        )
-                                    )
-                                except Exception:
-                                    logger.warning("on_chunk callback error", task_id=task.id, exc_info=True)
-
-                        elif event_type == "thinking":
-                            if on_chunk:
-                                try:
-                                    await on_chunk(
-                                        StreamEvent(
-                                            type="thinking",
-                                            text=str(event_data.get("content", "")),
-                                        )
-                                    )
-                                except Exception:
-                                    logger.warning("on_chunk callback error", task_id=task.id, exc_info=True)
-
-                        elif event_type == "init":
-                            session_id = event_data.get("session_id") or session_id
-                            if on_chunk:
-                                try:
-                                    await on_chunk(
-                                        StreamEvent(
-                                            type="init",
-                                            model=event_data.get("model"),
-                                            session_id=event_data.get("session_id"),
-                                        )
-                                    )
-                                except Exception:
-                                    logger.warning("on_chunk callback error", task_id=task.id, exc_info=True)
-
-                        elif event_type == "progress":
-                            if on_chunk:
-                                try:
-                                    await on_chunk(
-                                        StreamEvent(
-                                            type="progress",
-                                            total_tokens=event_data.get("total_tokens"),
-                                            tool_uses=event_data.get("tool_uses"),
-                                            duration_ms=event_data.get("duration_ms"),
-                                            description=event_data.get("description"),
-                                            last_tool_name=event_data.get("last_tool_name"),
-                                        )
-                                    )
-                                except Exception:
-                                    logger.warning("on_chunk callback error", task_id=task.id, exc_info=True)
+                    await _process_line(line)
 
             # Process any remaining lines after done
             for line in line_buffer.get_lines():
-                parsed = parse_stream_json_line(line)
-                if parsed is None:
-                    continue
-                remaining_events = parsed if isinstance(parsed, list) else [parsed]
-                for ev in remaining_events:
-                    if ev["type"] == "text":
-                        content = str(ev["content"])
-                        stream_parts.append(content)
-                        if ev.get("source") == "result":
-                            result_text = content
-                    elif ev["type"] == "cost":
-                        usage = TokenUsage(
-                            cost_usd=float(ev.get("cost_usd", 0) or 0),
-                            input_tokens=int(ev.get("input_tokens", 0) or 0),
-                            output_tokens=int(ev.get("output_tokens", 0) or 0),
-                            cache_read_tokens=int(ev.get("cache_read_tokens", 0) or 0),
-                            cache_write_tokens=int(ev.get("cache_write_tokens", 0) or 0),
-                            duration_ms=int(ev.get("duration_ms", 0) or 0),
-                        )
-                        session_id = ev.get("session_id") or session_id
-                    elif ev["type"] == "init":
-                        session_id = ev.get("session_id") or session_id
+                await _process_line(line)
 
             # Flush remaining buffer
             remaining = line_buffer.flush()
             if remaining:
-                parsed = parse_stream_json_line(remaining)
-                if parsed is not None:
-                    flush_events = parsed if isinstance(parsed, list) else [parsed]
-                    for ev in flush_events:
-                        if ev["type"] == "text":
-                            content = str(ev["content"])
-                            stream_parts.append(content)
-                            if ev.get("source") == "result":
-                                result_text = content
+                await _process_line(remaining)
 
         finally:
             loop.remove_reader(process.master_fd)
@@ -410,6 +373,7 @@ class ClaudeCodeExecutor:
         # Wait for process exit
         exit_code = await self._wait_for_exit(process)
         stream = "\n".join(stream_parts)
+        debug_context = "\n".join(debug_lines) if debug_lines else None
 
         if exit_code != 0 and not stream.strip():
             logger.error(
@@ -425,6 +389,7 @@ class ClaudeCodeExecutor:
             exit_code=exit_code,
             session_id=session_id,
             usage=usage,
+            debug_context=debug_context,
         )
 
     async def _wait_for_exit(self, process: PTYProcess, timeout: float = 5.0) -> int:

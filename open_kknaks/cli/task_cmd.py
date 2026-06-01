@@ -24,6 +24,9 @@ def status(
             task = await broker.get_task(task_id)
             if task:
                 typer.echo(f"Status: {task.status}")
+                typer.echo(f"Provider: {task.provider}")
+                if task.model:
+                    typer.echo(f"Model: {task.model}")
                 typer.echo(f"Queue: {task.queue}")
                 typer.echo(f"Priority: {task.priority}")
                 if task.error:
@@ -51,13 +54,13 @@ def result(
 
     async def _run() -> None:
         from open_kknaks.broker.redis import RedisBroker
-        from open_kknaks.client import ClaudeClient
+        from open_kknaks.client import AgentClient
 
         broker = RedisBroker(url=broker_url, namespace=namespace)
         await broker.connect()
         try:
             if wait:
-                client = ClaudeClient(broker=broker)
+                client = AgentClient(broker=broker)
                 task = await client.result(task_id, timeout=float(timeout))
             else:
                 task = await broker.get_task(task_id)
@@ -85,12 +88,12 @@ def cancel(
 
     async def _run() -> None:
         from open_kknaks.broker.redis import RedisBroker
-        from open_kknaks.client import ClaudeClient
+        from open_kknaks.client import AgentClient
 
         broker = RedisBroker(url=broker_url, namespace=namespace)
         await broker.connect()
         try:
-            client = ClaudeClient(broker=broker)
+            client = AgentClient(broker=broker)
             if await client.cancel(task_id):
                 typer.echo(f"Cancelled {task_id}")
             else:

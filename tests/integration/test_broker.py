@@ -125,6 +125,25 @@ class TestTaskState:
         assert fetched.status == "done"
         assert fetched.result == "completed"
 
+    @pytest.mark.asyncio
+    async def test_provider_fields_roundtrip(self, broker: RedisBroker) -> None:
+        task = Task(
+            prompt="provider task",
+            queue="default",
+            provider="codex",
+            model="gpt-5.4",
+            options={"cwd": "/repo", "resume": {"mode": "session", "session_id": "thread-1"}},
+            provider_options={"sandbox": "workspace-write", "color": "never"},
+        )
+        await broker.enqueue(task)
+
+        fetched = await broker.get_task(task.id)
+        assert fetched is not None
+        assert fetched.provider == "codex"
+        assert fetched.model == "gpt-5.4"
+        assert fetched.options == {"cwd": "/repo", "resume": {"mode": "session", "session_id": "thread-1"}}
+        assert fetched.provider_options == {"sandbox": "workspace-write", "color": "never"}
+
 
 class TestDLQ:
     @pytest.mark.asyncio

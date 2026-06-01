@@ -7,6 +7,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from open_kknaks.constants import DEFAULT_PROVIDER
+
 
 class TaskStatus(str, Enum):
     """Task lifecycle states."""
@@ -95,6 +97,7 @@ class TaskResult(BaseModel):
     exit_code: int = 0
     session_id: str | None = None
     usage: TokenUsage | None = None
+    debug_context: str | None = None
 
 
 def _uuid4_str() -> str:
@@ -115,26 +118,17 @@ class Task(BaseModel):
     prompt: str
     context: str | None = None
     queue: str = "default"
+    provider: str = DEFAULT_PROVIDER
 
     # Status & Priority
     status: str = TaskStatus.PENDING
     priority: int = Priority.NORMAL
     delay_until: datetime | None = None
 
-    # Claude Config (None = use Worker default)
+    # Provider Config (None = use Worker/adapter default)
     model: str | None = None
-    system_prompt: str | None = None
-    append_system_prompt: str | None = None
-    max_turns: int | None = None
-    effort: str | None = None
-    json_schema: str | None = None
-    allowed_tools: list[str] | None = None
-    disallowed_tools: list[str] | None = None
-    permission_mode: str | None = None
-    session_id: str | None = None
-    mcp_config: str | None = None
-    add_dirs: list[str] | None = None
-    timeout: int | None = None
+    options: dict[str, Any] = Field(default_factory=dict)
+    provider_options: dict[str, Any] = Field(default_factory=dict)
 
     # Retries
     max_retries: int = 0

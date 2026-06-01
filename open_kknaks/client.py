@@ -1,17 +1,19 @@
-"""ClaudeClient — async client for submitting tasks and monitoring results."""
+"""AgentClient — async client for submitting tasks and monitoring results."""
 
 import asyncio
 from collections.abc import AsyncIterator
+from typing import Any
 
 from open_kknaks.broker.base import AbstractBroker
+from open_kknaks.constants import DEFAULT_PROVIDER
 from open_kknaks.task import Priority, StreamEvent, Task, TaskStatus
 
 
-class ClaudeClient:
+class AgentClient:
     """Thin async client for the task queue.
 
     Submits tasks to the broker and monitors results.
-    Does NOT run Claude Code CLI directly — that's the Worker's job.
+    Does NOT run provider CLIs directly — that's the Worker's job.
     """
 
     def __init__(self, broker: AbstractBroker) -> None:
@@ -25,20 +27,11 @@ class ClaudeClient:
         queue: str = "default",
         priority: int | Priority = Priority.NORMAL,
         delay_seconds: int | None = None,
-        timeout: int | None = None,
         max_retries: int = 0,
+        provider: str = DEFAULT_PROVIDER,
         model: str | None = None,
-        system_prompt: str | None = None,
-        append_system_prompt: str | None = None,
-        max_turns: int | None = None,
-        effort: str | None = None,
-        json_schema: str | None = None,
-        allowed_tools: list[str] | None = None,
-        disallowed_tools: list[str] | None = None,
-        permission_mode: str | None = None,
-        session_id: str | None = None,
-        mcp_config: str | None = None,
-        add_dirs: list[str] | None = None,
+        options: dict[str, Any] | None = None,
+        provider_options: dict[str, Any] | None = None,
         metadata: dict[str, str | int | float | bool | None] | None = None,
     ) -> str:
         """Submit a task to the queue. Returns task_id."""
@@ -46,21 +39,12 @@ class ClaudeClient:
             prompt=prompt,
             context=context,
             queue=queue,
+            provider=provider,
             priority=int(priority),
-            timeout=timeout,
             max_retries=max_retries,
             model=model,
-            system_prompt=system_prompt,
-            append_system_prompt=append_system_prompt,
-            max_turns=max_turns,
-            effort=effort,
-            json_schema=json_schema,
-            allowed_tools=allowed_tools,
-            disallowed_tools=disallowed_tools,
-            permission_mode=permission_mode,
-            session_id=session_id,
-            mcp_config=mcp_config,
-            add_dirs=add_dirs,
+            options=options or {},
+            provider_options=provider_options or {},
             metadata=metadata or {},
         )
         await self.broker.enqueue(task, delay=delay_seconds)

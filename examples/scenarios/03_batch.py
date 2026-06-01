@@ -2,6 +2,8 @@
 
 import asyncio
 
+from common import describe_task_defaults, task_defaults
+
 from open_kknaks.batch import BatchRunner
 from open_kknaks.broker.redis import RedisBroker
 
@@ -12,11 +14,13 @@ async def main() -> None:
     runner = BatchRunner(broker=broker)
 
     try:
+        defaults = task_defaults()
+        print(describe_task_defaults(defaults))
         batch_id, task_ids = await runner.submit_batch(
             [
-                {"prompt": "Explain Python's GIL in 2 sentences."},
-                {"prompt": "Explain asyncio event loop in 2 sentences."},
-                {"prompt": "Compare multiprocessing vs threading in Python in 2 sentences."},
+                {"prompt": "Explain Python's GIL in 2 sentences.", **defaults},
+                {"prompt": "Explain asyncio event loop in 2 sentences.", **defaults},
+                {"prompt": "Compare multiprocessing vs threading in Python in 2 sentences.", **defaults},
             ],
             queue="default",
         )

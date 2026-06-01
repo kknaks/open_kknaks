@@ -3,8 +3,10 @@
 import asyncio
 import uuid
 from enum import Enum
+from typing import Any
 
 from open_kknaks.broker.base import AbstractBroker
+from open_kknaks.constants import DEFAULT_PROVIDER
 from open_kknaks.task import Task, TaskStatus
 
 
@@ -26,27 +28,30 @@ class BatchRunner:
 
     async def submit_batch(
         self,
-        prompts: list[dict[str, str]],
+        items: list[dict[str, Any]],
         *,
         queue: str = "default",
-        mode: str = "parallel",
     ) -> tuple[str, list[str]]:
         """Submit a batch of tasks. Returns (batch_id, task_ids).
 
         Args:
-            prompts: List of dicts with at least "prompt" key.
+            items: List of dicts with at least "prompt" key.
             queue: Target queue name.
-            mode: "parallel" (all at once) or "sequential" (one by one).
         """
         batch_id = str(uuid.uuid4())
         task_ids: list[str] = []
 
-        for item in prompts:
+        for item in items:
             task = Task(
-                prompt=item["prompt"],
+                prompt=str(item["prompt"]),
                 context=item.get("context"),
                 queue=queue,
+                provider=str(item.get("provider", DEFAULT_PROVIDER)),
+                model=str(item["model"]) if item.get("model") else None,
+                options=dict(item.get("options", {})),
+                provider_options=dict(item.get("provider_options", {})),
                 batch_id=batch_id,
+                metadata=dict(item.get("metadata", {})),
             )
             await self.broker.enqueue(task)
             task_ids.append(task.id)
@@ -57,24 +62,32 @@ class BatchRunner:
         """Compute batch status from individual task statuses."""
         done_count = 0
         failed_count = 0
+        running_count = 0
+        seen_count = 0
 
         for task_id in task_ids:
             task = await self.broker.get_task(task_id)
             if task is None:
                 continue
+            seen_count += 1
             if task.status == TaskStatus.DONE:
                 done_count += 1
             elif task.status in (TaskStatus.FAILED, TaskStatus.CANCELLED):
                 failed_count += 1
+            elif task.status == TaskStatus.RUNNING:
+                running_count += 1
 
         total = len(task_ids)
+        terminal_count = done_count + failed_count
+        if seen_count == 0:
+            return BatchStatus.PENDING
         if done_count == total:
             return BatchStatus.COMPLETED
         if failed_count == total:
             return BatchStatus.FAILED
-        if done_count + failed_count == total:
+        if terminal_count == total:
             return BatchStatus.PARTIAL_FAILURE
-        if done_count > 0 or failed_count > 0:
+        if running_count > 0 or terminal_count > 0:
             return BatchStatus.RUNNING
         return BatchStatus.PENDING
 
@@ -108,10 +121,14 @@ class BatchRunner:
         try:
             await asyncio.wait_for(_poll(), timeout=timeout)
         except (TimeoutError, asyncio.TimeoutError):
-            # Collect whatever is done
+            # Collect terminal snapshots only.
             for task_id in pending:
                 task = await self.broker.get_task(task_id)
-                if task:
+                if task and task.status in (
+                    TaskStatus.DONE,
+                    TaskStatus.FAILED,
+                    TaskStatus.CANCELLED,
+                ):
                     results.append(task)
 
         return results

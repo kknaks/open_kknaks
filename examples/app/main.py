@@ -1,9 +1,10 @@
 """Example FastAPI app — web UI + REST API for task queue."""
 
+import json
 import os
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import AsyncIterator
 
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse
@@ -12,7 +13,8 @@ from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
 
 from open_kknaks.broker.redis import RedisBroker
-from open_kknaks.client import ClaudeClient
+from open_kknaks.client import AgentClient
+from open_kknaks.constants import DEFAULT_PROVIDER, PROVIDER_CODEX
 
 
 @asynccontextmanager
@@ -22,7 +24,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         namespace=os.environ.get("NAMESPACE", "example"),
     )
     await broker.connect()
-    app.state.client = ClaudeClient(broker=broker)
+    app.state.client = AgentClient(broker=broker)
     app.state.broker = broker
     yield
     await broker.close()
@@ -38,6 +40,10 @@ class SubmitRequest(BaseModel):
     context: str | None = None
     queue: str = "default"
     priority: str = "normal"
+    provider: str = DEFAULT_PROVIDER
+    model: str | None = None
+    options: dict[str, object] | None = None
+    provider_options: dict[str, object] | None = None
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -47,7 +53,7 @@ async def index(request: Request) -> HTMLResponse:
 
 @app.get("/health")
 async def health(request: Request) -> dict[str, object]:
-    """Health check: Redis connection + worker info + Claude status."""
+    """Health check: Redis connection + worker info + provider status."""
     import json as _json
 
     broker: RedisBroker = request.app.state.broker
@@ -57,7 +63,7 @@ async def health(request: Request) -> dict[str, object]:
     except Exception:
         redis_ok = False
 
-    # Check registered workers and their claude status
+    # Check registered workers and their provider status
     workers_raw = await broker.redis.hgetall(broker._key("workers"))
     workers: list[dict[str, object]] = []
     for wid, wdata in workers_raw.items():
@@ -67,6 +73,8 @@ async def health(request: Request) -> dict[str, object]:
             "id": worker_id,
             "claude": info.get("claude", "unknown"),
             "claude_version": info.get("claude_version", ""),
+            "codex": info.get("codex", "unknown"),
+            "codex_version": info.get("codex_version", ""),
             "queues": info.get("queues", []),
         })
 
@@ -75,20 +83,20 @@ async def health(request: Request) -> dict[str, object]:
     for q in ("default", "analysis", "review"):
         queues_info[q] = await broker.queue_size(q)
 
-    # Overall claude status
-    claude_statuses = [w["claude"] for w in workers]
-    if not claude_statuses:
-        claude_status = "no_workers"
-    elif all(s == "ok" for s in claude_statuses):
-        claude_status = "connected"
-    elif any(s == "ok" for s in claude_statuses):
-        claude_status = "partial"
-    else:
-        claude_status = "disconnected"
+    def provider_status(provider: str) -> str:
+        statuses = [w[provider] for w in workers]
+        if not statuses:
+            return "no_workers"
+        if all(s == "ok" for s in statuses):
+            return "connected"
+        if any(s == "ok" for s in statuses):
+            return "partial"
+        return "disconnected"
 
     return {
         "redis": "connected" if redis_ok else "disconnected",
-        "claude": claude_status,
+        "claude": provider_status("claude"),
+        "codex": provider_status(PROVIDER_CODEX),
         "workers": workers,
         "worker_count": len(workers),
         "queues": queues_info,
@@ -98,25 +106,29 @@ async def health(request: Request) -> dict[str, object]:
 
 @app.post("/submit")
 async def submit_task(req: SubmitRequest, request: Request) -> dict[str, str]:
-    client: ClaudeClient = request.app.state.client
+    client: AgentClient = request.app.state.client
     task_id = await client.submit(
         prompt=req.prompt,
         context=req.context,
         queue=req.queue,
+        provider=req.provider,
+        model=req.model,
+        options=req.options,
+        provider_options=req.provider_options,
     )
     return {"task_id": task_id}
 
 
 @app.get("/status/{task_id}")
 async def get_status(task_id: str, request: Request) -> dict[str, str | None]:
-    client: ClaudeClient = request.app.state.client
+    client: AgentClient = request.app.state.client
     status = await client.status(task_id)
     return {"task_id": task_id, "status": status}
 
 
 @app.get("/result/{task_id}")
 async def get_result(task_id: str, request: Request) -> dict[str, object]:
-    client: ClaudeClient = request.app.state.client
+    client: AgentClient = request.app.state.client
     task = await client.result(task_id, timeout=600)
     if task is None:
         return {"task_id": task_id, "status": "not_found", "result": None}
@@ -124,13 +136,15 @@ async def get_result(task_id: str, request: Request) -> dict[str, object]:
         "task_id": task.id,
         "status": task.status,
         "result": task.result,
+        "error": task.error,
+        "exit_code": task.exit_code,
         "usage": task.usage.model_dump() if task.usage else None,
     }
 
 
 @app.get("/stream/{task_id}")
 async def stream_task(task_id: str, request: Request) -> EventSourceResponse:
-    client: ClaudeClient = request.app.state.client
+    client: AgentClient = request.app.state.client
 
     async def generate() -> AsyncIterator[dict[str, str]]:
         async for event in client.stream(task_id):
@@ -138,6 +152,13 @@ async def stream_task(task_id: str, request: Request) -> EventSourceResponse:
                 yield {"event": "text", "data": event.text}
             elif event.type == "retry":
                 yield {"event": "retry", "data": str(event.retry_info)}
-        yield {"event": "done", "data": ""}
+        task = await client.result(task_id, timeout=1)
+        payload = {
+            "status": task.status if task else "not_found",
+            "result": task.result if task else None,
+            "error": task.error if task else None,
+            "exit_code": task.exit_code if task else None,
+        }
+        yield {"event": "done", "data": json.dumps(payload, ensure_ascii=False)}
 
     return EventSourceResponse(generate())

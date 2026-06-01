@@ -9,7 +9,7 @@ from open_kknaks.cli.worker_cmd import worker_app
 
 app = typer.Typer(
     name="open-kknaks",
-    help="PTY-based Claude Code task queue",
+    help="Provider-based headless agent task queue",
     no_args_is_help=True,
 )
 

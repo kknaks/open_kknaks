@@ -49,7 +49,12 @@ exclude = ["examples/", "tests/", "docs/"]
 [tool.ruff]
 line-length = 120
 target-version = "py310"
-extend-exclude = ["open_kknaks/_version.py"]
+extend-exclude = [
+    "open_kknaks/_version.py",
+    "examples/.claude-tools/",
+    "examples/.codex-home/",
+    "examples/.codex-tools/",
+]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF"]

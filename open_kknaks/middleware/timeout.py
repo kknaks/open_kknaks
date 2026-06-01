@@ -24,12 +24,12 @@ class TimeoutMiddleware(Middleware):
 
     async def before_process(self, broker: AbstractBroker, task: Task) -> None:
         # Ensure task has a timeout set
-        if task.timeout is None:
-            task.timeout = self.default_timeout
+        if "timeout_sec" not in task.options:
+            task.options = {**task.options, "timeout_sec": self.default_timeout}
         logger.debug(
             "timeout.set",
             task_id=task.id,
-            timeout=task.timeout,
+            timeout=task.options["timeout_sec"],
         )
 
     async def after_process(
@@ -46,6 +46,6 @@ class TimeoutMiddleware(Middleware):
             logger.warning(
                 "timeout.exceeded",
                 task_id=task.id,
-                timeout=task.timeout,
+                timeout=task.options.get("timeout_sec"),
                 exception_type=type(exception).__name__,
             )

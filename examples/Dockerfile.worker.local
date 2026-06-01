@@ -1,0 +1,17 @@
+FROM python:3.12-slim
+
+WORKDIR /src
+
+COPY pyproject.toml README.md ./
+COPY open_kknaks/ ./open_kknaks/
+
+ENV SETUPTOOLS_SCM_PRETEND_VERSION=0.0.0+local
+RUN pip install --no-cache-dir .
+
+RUN useradd -m worker
+USER worker
+
+WORKDIR /app
+COPY --chown=worker:worker examples/worker/ .
+
+CMD ["python3", "run.py"]

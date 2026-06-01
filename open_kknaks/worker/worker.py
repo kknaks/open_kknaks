@@ -1,9 +1,7 @@
 """ClaudeWorker — dequeue tasks and execute via PTY."""
 
 import asyncio
-import shutil
 import signal
-import subprocess
 import uuid
 from datetime import datetime, timezone
 
@@ -11,10 +9,12 @@ import structlog
 
 from open_kknaks.broker.base import AbstractBroker
 from open_kknaks.config import ClaudeConfig
+from open_kknaks.constants import PROVIDER_CLAUDE, PROVIDER_CODEX
 from open_kknaks.exceptions import TaskCancelledError
 from open_kknaks.middleware.base import Middleware
 from open_kknaks.task import StreamEvent, Task, TaskResult, TaskStatus
-from open_kknaks.worker.executor import ClaudeCodeExecutor
+from open_kknaks.worker.adapter import ClaudeRunnerAdapter, RunnerAdapter
+from open_kknaks.worker.codex_adapter import CodexRunnerAdapter
 
 logger = structlog.get_logger()
 
@@ -48,41 +48,29 @@ class ClaudeWorker:
         self.stale_timeout = 60.0
         self.maintenance_interval = 30.0
 
-        self._executor = ClaudeCodeExecutor(
-            claude_bin=self.config.claude_bin or "claude",
-        )
+        self._adapters: dict[str, RunnerAdapter] = {
+            PROVIDER_CLAUDE: ClaudeRunnerAdapter(self.config),
+            PROVIDER_CODEX: CodexRunnerAdapter(),
+        }
         self._semaphore = asyncio.Semaphore(concurrency)
         self._running = False
         self._stopping = False
         self._tasks: set[asyncio.Task[None]] = set()
 
-    def _check_claude_status(self) -> dict[str, str]:
-        """Check Claude CLI availability and version."""
-        claude_bin = self.config.claude_bin or "claude"
-        path = shutil.which(claude_bin)
-        if not path:
-            return {"claude": "not_found", "claude_version": "", "claude_path": ""}
-
-        try:
-            result = subprocess.run(
-                [claude_bin, "--version"],
-                capture_output=True,
-                text=True,
-                timeout=5,
-            )
-            version = result.stdout.strip() if result.returncode == 0 else "unknown"
-        except Exception:
-            version = "unknown"
-
-        return {"claude": "ok", "claude_version": version, "claude_path": path}
+    def _check_provider_status(self) -> dict[str, str]:
+        """Check provider CLI availability and versions."""
+        status: dict[str, str] = {}
+        for adapter in self._adapters.values():
+            status.update(adapter.health_check())
+        return status
 
     async def start(self) -> None:
         """Start the worker loops."""
         self._running = True
 
-        # Check Claude CLI status
-        self._claude_status = self._check_claude_status()
-        logger.info("claude.check", **self._claude_status)
+        # Check provider CLI status
+        self._provider_status = self._check_provider_status()
+        logger.info("provider.check", **self._provider_status)
 
         # Reap stale workers from previous runs (Redis 찌꺼기 정리)
         try:
@@ -92,8 +80,8 @@ class ClaudeWorker:
         except Exception:
             logger.error("worker.startup_cleanup_failed", exc_info=True)
 
-        # Register worker with claude status
-        await self.broker.register_worker(self.worker_id, self.queues, self._claude_status)
+        # Register worker with provider status
+        await self.broker.register_worker(self.worker_id, self.queues, self._provider_status)
 
         # Emit before_worker_boot
         for mw in self.middleware:
@@ -146,8 +134,11 @@ class ClaudeWorker:
                     pending=len(pending),
                 )
                 # Collect active task IDs before cleanup
-                active_task_ids = list(self._executor._active.keys())
-                terminated = await self._executor.cleanup_all()
+                active_task_ids: list[str] = []
+                terminated = 0
+                for adapter in self._adapters.values():
+                    active_task_ids.extend(adapter.active_task_ids())
+                    terminated += await adapter.cleanup_all()
                 for t in pending:
                     t.cancel()
 
@@ -195,25 +186,21 @@ class ClaudeWorker:
             await asyncio.sleep(1.0)
 
     def _merge_config(self, task: Task) -> ClaudeConfig:
-        """Merge worker config with task-level overrides."""
-        overrides: dict[str, object] = {}
-        for field in (
-            "model",
-            "system_prompt",
-            "append_system_prompt",
-            "max_turns",
-            "effort",
-            "json_schema",
-            "allowed_tools",
-            "disallowed_tools",
-            "permission_mode",
-            "mcp_config",
-            "add_dirs",
-        ):
-            value = getattr(task, field, None)
-            if value is not None:
-                overrides[field] = value
-        return self.config.merge_task_overrides(overrides)
+        """Merge worker config with task-level provider overrides."""
+        overrides: dict[str, object] = dict(task.provider_options)
+        if task.model is not None:
+            overrides["model"] = task.model
+
+        merged = self.config.merge_task_overrides(overrides)
+
+        cwd = task.options.get("cwd")
+        if isinstance(cwd, str) and cwd:
+            merged = merged.model_copy(update={"work_dir": cwd})
+
+        return merged
+
+    def _get_adapter(self, provider: str) -> RunnerAdapter | None:
+        return self._adapters.get(provider)
 
     # ─── Internal Loops ───
 
@@ -281,6 +268,20 @@ class ClaudeWorker:
         exception: BaseException | None = None
 
         try:
+            if task.status == TaskStatus.CANCELLED:
+                task.finished_at = datetime.now(timezone.utc)
+                await self.broker.update_task(task)
+                await self.broker.ack(task.queue, task.id)
+                return
+
+            adapter = self._get_adapter(task.provider)
+            if adapter is None:
+                task.status = TaskStatus.FAILED
+                task.error = f"Unsupported provider: {task.provider}"
+                task.finished_at = datetime.now(timezone.utc)
+                await self.broker.update_task(task)
+                return
+
             # Update status to RUNNING
             task.status = TaskStatus.RUNNING
             task.started_at = datetime.now(timezone.utc)
@@ -294,11 +295,11 @@ class ClaudeWorker:
             # Merge config
             config = self._merge_config(task)
 
-            # Execute via PTY
+            # Execute via provider adapter
             async def _on_chunk(chunk: StreamEvent) -> None:
                 await self.broker.publish_chunk(task.id, chunk)
 
-            result = await self._executor.execute(
+            result = await adapter.execute(
                 task=task,
                 config=config,
                 on_chunk=_on_chunk,
@@ -316,7 +317,7 @@ class ClaudeWorker:
                 # Prefer the full stream for error context — when the process
                 # crashes the result text is usually empty, but stream may carry
                 # partial assistant output or error messages from the CLI.
-                error_context = result.stream.strip() or result.result.strip()
+                error_context = result.stream.strip() or result.result.strip() or (result.debug_context or "").strip()
                 task.error = (
                     error_context[:500]
                     if error_context

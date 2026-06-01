@@ -6,20 +6,25 @@ so Claude Code can read the actual source files.
 
 import asyncio
 
+from common import describe_task_defaults, task_defaults
+
 from open_kknaks.broker.redis import RedisBroker
-from open_kknaks.client import ClaudeClient
+from open_kknaks.client import AgentClient
 
 
 async def main() -> None:
     broker = RedisBroker(url="redis://localhost:6379", namespace="example")
     await broker.connect()
-    client = ClaudeClient(broker=broker)
+    client = AgentClient(broker=broker)
 
     try:
+        defaults = task_defaults()
+        print(describe_task_defaults(defaults))
         task_id = await client.submit(
             "open_kknaks/ 디렉토리의 구조를 분석하고, "
             "각 레이어(L0~L5)별로 핵심 파일과 역할을 한 줄씩 요약해줘. "
             "코드를 직접 읽어서 답해줘.",
+            **defaults,
         )
         print(f"Submitted: {task_id}")
         print("Waiting for Claude to analyze the project...\n")

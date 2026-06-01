@@ -1,8 +1,13 @@
 """Tests for ClaudeCodeExecutor — unit tests (no real Claude CLI)."""
 
+import os
+
+import pytest
+
 from open_kknaks.config import ClaudeConfig
-from open_kknaks.task import Task
+from open_kknaks.task import StreamEvent, Task, TaskResult
 from open_kknaks.worker.executor import ClaudeCodeExecutor
+from open_kknaks.worker.pty_process import PTYProcess
 
 
 class TestBuildCommand:
@@ -82,7 +87,7 @@ class TestBuildCommand:
 
     def test_with_session_id(self) -> None:
         executor = ClaudeCodeExecutor()
-        task = Task(prompt="test", session_id="sess-123")
+        task = Task(prompt="test", options={"resume": {"mode": "session", "session_id": "sess-123"}})
         config = ClaudeConfig()
         cmd = executor._build_command(task, config)
         idx = cmd.index("--resume")
@@ -132,3 +137,43 @@ class TestBuildCommand:
         cmd = executor._build_command(task, config)
         assert "--permission-mode" not in cmd
         assert "--dangerously-skip-permissions" not in cmd
+
+
+class TestReadPtyOutput:
+    async def _run_pipe_output(self, payload: bytes, exit_code: int = 0) -> tuple[list[StreamEvent], TaskResult]:
+        read_fd, write_fd = os.pipe()
+        os.write(write_fd, payload)
+        os.close(write_fd)
+
+        executor = ClaudeCodeExecutor()
+
+        async def fake_wait_for_exit(_process: PTYProcess, timeout: float = 5.0) -> int:
+            return exit_code
+
+        executor._wait_for_exit = fake_wait_for_exit  # type: ignore[method-assign]
+        process = PTYProcess(pid=999999, master_fd=read_fd, pgid=999999, task_id="task-1")
+        events: list[StreamEvent] = []
+
+        async def on_chunk(event: StreamEvent) -> None:
+            events.append(event)
+
+        result = await executor._read_pty_output(process, Task(id="task-1", prompt="test"), on_chunk)
+        return events, result
+
+    @pytest.mark.asyncio
+    async def test_flush_without_trailing_newline_publishes_event(self) -> None:
+        events, result = await self._run_pipe_output(b'{"type":"result","result":"done","cost_usd":0.01}')
+
+        assert [event.type for event in events] == ["cost", "text"]
+        assert events[-1].text == "done"
+        assert result.result == "done"
+        assert result.stream == "done"
+
+    @pytest.mark.asyncio
+    async def test_non_json_line_is_debug_context_not_stream_event(self) -> None:
+        events, result = await self._run_pipe_output(b"open_kknaks: child process error: missing binary", exit_code=1)
+
+        assert events == []
+        assert result.exit_code == 1
+        assert result.stream == ""
+        assert result.debug_context == "open_kknaks: child process error: missing binary"

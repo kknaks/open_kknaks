@@ -7,7 +7,7 @@ from mcp.types import TextContent, Tool
 
 # from open_kknaks.batch import BatchRunner
 # from open_kknaks.broker.base import AbstractBroker
-# from open_kknaks.client import ClaudeClient
+# from open_kknaks.client import AgentClient
 
 
 # def _task_to_json(task: "open_kknaks.task.Task") -> str:
@@ -50,9 +50,9 @@ def _submit_task_tool() -> Tool:
     return Tool(
         name="submit_task",
         description=(
-            "Submit a task to the open_kknaks Claude Code task queue. "
+            "Submit a task to the open_kknaks agent queue. "
             "The task is enqueued and executed asynchronously by a Worker process "
-            "running Claude Code CLI via PTY. Returns a task_id (UUID) for tracking. "
+            "using the selected provider runner. Returns a task_id (UUID) for tracking. "
             "Use get_task, get_status, or get_result to monitor progress."
         ),
         inputSchema={
@@ -61,9 +61,7 @@ def _submit_task_tool() -> Tool:
                 "prompt": {
                     "type": "string",
                     "description": (
-                        "The prompt to send to Claude Code CLI. "
-                        "This is the main instruction for the task — equivalent to "
-                        "running `claude -p '<prompt>'` on the command line."
+                        "The prompt to send to the selected provider runner. This is the main instruction for the task."
                     ),
                 },
                 "context": {
@@ -99,14 +97,6 @@ def _submit_task_tool() -> Tool:
                         "Useful for scheduling tasks in the future."
                     ),
                 },
-                "timeout": {
-                    "type": "integer",
-                    "description": (
-                        "Maximum execution time in seconds. If the Claude Code process "
-                        "exceeds this duration, it is terminated via SIGHUP→SIGTERM→SIGKILL. "
-                        "Default is determined by the Worker configuration."
-                    ),
-                },
                 "max_retries": {
                     "type": "integer",
                     "description": (
@@ -118,110 +108,29 @@ def _submit_task_tool() -> Tool:
                 },
                 "model": {
                     "type": "string",
-                    "description": (
-                        "Claude model to use (overrides Worker default). "
-                        "Maps to `claude --model <model>`. "
-                        "Examples: 'claude-sonnet-4-5-20250514', 'claude-opus-4-0-20250514'. "
-                        "If not set, the Worker's ClaudeConfig.model is used."
-                    ),
+                    "description": ("Provider model override. The selected runner maps this to its native model flag."),
                 },
-                "system_prompt": {
+                "provider": {
                     "type": "string",
+                    "enum": ["claude", "codex"],
                     "description": (
-                        "Custom system prompt that replaces the default Claude Code system prompt. "
-                        "Maps to `claude --system-prompt '<text>'`. "
-                        "Use this when you need full control over the system instruction."
+                        "Provider runner to use. Defaults to 'claude'. Supported values are 'claude' and 'codex'."
                     ),
                 },
-                "append_system_prompt": {
-                    "type": "string",
+                "options": {
+                    "type": "object",
+                    "additionalProperties": True,
                     "description": (
-                        "Text appended to the default system prompt (does not replace it). "
-                        "Maps to `claude --append-system-prompt '<text>'`. "
-                        "Useful for adding project-specific instructions while keeping "
-                        "Claude Code's built-in capabilities."
+                        "Common execution options interpreted by open_kknaks, such as cwd, timeout_sec, "
+                        "and resume {mode, session_id}."
                     ),
                 },
-                "max_turns": {
-                    "type": "integer",
+                "provider_options": {
+                    "type": "object",
+                    "additionalProperties": True,
                     "description": (
-                        "Maximum number of agentic turns (tool-use rounds) allowed. "
-                        "Maps to `claude --max-turns <n>`. "
-                        "Limits how many times Claude can invoke tools before returning. "
-                        "Useful for controlling cost and execution time."
-                    ),
-                },
-                "effort": {
-                    "type": "string",
-                    "description": (
-                        "Thinking effort level. Controls depth of reasoning. "
-                        "Maps to `claude --effort <level>`. "
-                        "Values: 'low', 'medium', 'high'. Higher effort = more tokens = better results."
-                    ),
-                    "enum": ["low", "medium", "high"],
-                },
-                "json_schema": {
-                    "type": "string",
-                    "description": (
-                        "JSON Schema string for structured output. "
-                        "Maps to `claude --output-format json --json-schema '<schema>'`. "
-                        "When provided, Claude's response is constrained to match this schema. "
-                        "Must be a valid JSON Schema as a string."
-                    ),
-                },
-                "allowed_tools": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": (
-                        "Explicit list of tools Claude is allowed to use. "
-                        "Maps to `claude --allowedTools '<tool1>,<tool2>,...'`. "
-                        "Examples: ['Bash', 'Read', 'Write', 'Edit', 'Glob', 'Grep']. "
-                        "If not set, all tools available in the Worker's environment are allowed."
-                    ),
-                },
-                "disallowed_tools": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": (
-                        "List of tools Claude is NOT allowed to use. "
-                        "Maps to `claude --disallowedTools '<tool1>,<tool2>,...'`. "
-                        "Takes precedence over allowed_tools."
-                    ),
-                },
-                "permission_mode": {
-                    "type": "string",
-                    "description": (
-                        "Permission prompt mode for tool execution. "
-                        "Maps to `claude --permission-mode <mode>`. "
-                        "Values: 'default' (prompt user), 'plan' (allow read, block write), "
-                        "'bypasstool' (auto-approve all tools). "
-                        "Workers typically run with 'bypasstool' for unattended execution."
-                    ),
-                },
-                "session_id": {
-                    "type": "string",
-                    "description": (
-                        "Resume a previous Claude Code session by its ID. "
-                        "Maps to `claude --session-id <id>`. "
-                        "The new task continues in the context of the prior session, "
-                        "preserving conversation history and tool state."
-                    ),
-                },
-                "mcp_config": {
-                    "type": "string",
-                    "description": (
-                        "Path to an MCP (Model Context Protocol) configuration JSON file. "
-                        "Maps to `claude --mcp-config <path>`. "
-                        "Configures additional MCP servers available to Claude during execution."
-                    ),
-                },
-                "add_dirs": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": (
-                        "Additional directories Claude can access beyond the Worker's work_dir. "
-                        "Maps to `claude --add-dir <dir>` (repeated for each). "
-                        "Useful for multi-repo tasks or accessing shared libraries."
+                        "Provider-specific runner options. Claude and Codex adapters validate and map "
+                        "their supported keys to native CLI flags."
                     ),
                 },
                 "metadata": {
@@ -605,7 +514,7 @@ def create_server() -> Server:
         return [
             TextContent(
                 type="text",
-                text=(f"Tool '{name}' is schema-only. To execute, use ClaudeClient (Python API) or open-kknaks CLI."),
+                text=(f"Tool '{name}' is schema-only. To execute, use AgentClient (Python API) or open-kknaks CLI."),
             )
         ]
 
@@ -616,7 +525,7 @@ def create_server() -> Server:
     #
     # @server.call_tool()
     # async def call_tool(name, arguments):
-    #     client = ClaudeClient(broker=broker)
+    #     client = AgentClient(broker=broker)
     #
     #     if name == "submit_task":
     #         task_id = await client.submit(

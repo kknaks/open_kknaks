@@ -1,0 +1,12 @@
+services:
+  worker:
+    build:
+      context: ..
+      dockerfile: examples/Dockerfile.worker.local
+    volumes:
+      - ..:/project:ro
+
+  app:
+    build:
+      context: ..
+      dockerfile: examples/Dockerfile.app.local

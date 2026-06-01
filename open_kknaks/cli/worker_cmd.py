@@ -4,6 +4,8 @@ import asyncio
 
 import typer
 
+from open_kknaks.constants import DEFAULT_PROVIDER, SUPPORTED_PROVIDERS
+
 worker_app = typer.Typer(no_args_is_help=True)
 
 
@@ -14,10 +16,15 @@ def run(
     queues: str = typer.Option("default", "--queues", help="Comma-separated queue names"),
     work_dir: str = typer.Option(".", "--work-dir"),
     model: str | None = typer.Option(None, "--model"),
+    provider: str = typer.Option(DEFAULT_PROVIDER, "--provider"),
     concurrency: int = typer.Option(4, "--concurrency"),
     shutdown_timeout: int = typer.Option(30, "--shutdown-timeout"),
 ) -> None:
-    """Run a Claude Code worker."""
+    """Run an open_kknaks worker."""
+
+    if provider not in SUPPORTED_PROVIDERS:
+        supported = ", ".join(sorted(SUPPORTED_PROVIDERS))
+        raise typer.BadParameter(f"Unsupported provider: {provider}. Supported: {supported}")
 
     async def _run() -> None:
         from open_kknaks.broker.redis import RedisBroker

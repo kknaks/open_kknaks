@@ -2,21 +2,26 @@
 
 import asyncio
 
+from common import describe_task_defaults, task_defaults
+
 from open_kknaks.broker.redis import RedisBroker
-from open_kknaks.client import ClaudeClient
+from open_kknaks.client import AgentClient
 
 
 async def main() -> None:
     broker = RedisBroker(url="redis://localhost:6379", namespace="example")
     await broker.connect()
-    client = ClaudeClient(broker=broker)
+    client = AgentClient(broker=broker)
 
     try:
+        defaults = task_defaults()
+        print(describe_task_defaults(defaults))
         # Analysis queue
         t1 = await client.submit(
             "Analyze this error log",
             context="TypeError: cannot unpack non-iterable NoneType object",
             queue="analysis",
+            **defaults,
         )
         print(f"Analysis task: {t1}")
 
@@ -25,6 +30,7 @@ async def main() -> None:
             "Review this code",
             context="def foo(x): return x+1",
             queue="review",
+            **defaults,
         )
         print(f"Review task: {t2}")
 

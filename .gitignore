@@ -5,3 +5,7 @@ dist/
 build/
 .venv/
 open_kknaks/_version.py
+examples/.env
+examples/.claude-tools/
+examples/.codex-tools/
+examples/.codex-home/
