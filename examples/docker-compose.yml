@@ -22,6 +22,7 @@ services:
       - PATH=/codex-tools/node_modules/.bin:/claude-tools/node/bin:/claude-tools/node_modules/.bin:/usr/local/bin:/usr/bin:/bin
       - CODEX_HOME=/codex-home
     volumes:
+      - ..:/project:ro
       - ./.claude-tools:/claude-tools:ro
       - ./.codex-tools:/codex-tools:ro
       - ./.codex-home:/codex-home
