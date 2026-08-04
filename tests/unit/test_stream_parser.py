@@ -271,6 +271,26 @@ class TestParseToolUse:
         assert parsed["tool_name"] == "Bash"
         assert parsed["tool_input"] == {"command": "ls -la"}
 
+    def test_tool_use_carries_id(self) -> None:
+        line = json.dumps(
+            {
+                "type": "assistant",
+                "message": {
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": "toolu_01YWQWYuJC3LpmnftHDoWVJ8",
+                            "name": "Bash",
+                            "input": {"command": "echo hello"},
+                        }
+                    ]
+                },
+            }
+        )
+        parsed = parse_stream_json_line(line)
+        assert isinstance(parsed, dict)
+        assert parsed["tool_use_id"] == "toolu_01YWQWYuJC3LpmnftHDoWVJ8"
+
     def test_tool_use_empty_input(self) -> None:
         line = json.dumps(
             {
@@ -323,6 +343,110 @@ class TestParseToolResult:
         parsed = parse_stream_json_line(line)
         assert parsed is not None
         assert parsed["tool_is_error"] is True
+
+
+class TestParseUserToolResult:
+    """tool_result blocks arrive inside type=="user" messages (real CLI shape)."""
+
+    def test_user_tool_result_string_content(self) -> None:
+        # Shape captured from a real `claude -p ... --output-format stream-json` run
+        line = json.dumps(
+            {
+                "type": "user",
+                "message": {
+                    "role": "user",
+                    "content": [
+                        {
+                            "tool_use_id": "toolu_01YWQWYuJC3LpmnftHDoWVJ8",
+                            "type": "tool_result",
+                            "content": "hello",
+                            "is_error": False,
+                        }
+                    ],
+                },
+                "session_id": "742dbd67-abda-415b-b7fb-36425b2f622c",
+            }
+        )
+        parsed = parse_stream_json_line(line)
+        assert isinstance(parsed, dict)
+        assert parsed["type"] == "tool_result"
+        assert parsed["tool_result"] == "hello"
+        assert parsed["tool_is_error"] is False
+        assert parsed["tool_use_id"] == "toolu_01YWQWYuJC3LpmnftHDoWVJ8"
+
+    def test_user_tool_result_list_content(self) -> None:
+        line = json.dumps(
+            {
+                "type": "user",
+                "message": {
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "toolu_123",
+                            "content": [
+                                {"type": "text", "text": "line 1"},
+                                {"type": "text", "text": "line 2"},
+                            ],
+                            "is_error": False,
+                        }
+                    ]
+                },
+            }
+        )
+        parsed = parse_stream_json_line(line)
+        assert isinstance(parsed, dict)
+        assert parsed["tool_result"] == "line 1\nline 2"
+
+    def test_user_tool_result_error(self) -> None:
+        line = json.dumps(
+            {
+                "type": "user",
+                "message": {
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "toolu_err",
+                            "content": "command not found",
+                            "is_error": True,
+                        }
+                    ]
+                },
+            }
+        )
+        parsed = parse_stream_json_line(line)
+        assert isinstance(parsed, dict)
+        assert parsed["type"] == "tool_result"
+        assert parsed["tool_is_error"] is True
+
+    def test_user_multiple_tool_results(self) -> None:
+        line = json.dumps(
+            {
+                "type": "user",
+                "message": {
+                    "content": [
+                        {"type": "tool_result", "tool_use_id": "toolu_a", "content": "out a"},
+                        {"type": "tool_result", "tool_use_id": "toolu_b", "content": "out b"},
+                    ]
+                },
+            }
+        )
+        parsed = parse_stream_json_line(line)
+        assert isinstance(parsed, list)
+        assert len(parsed) == 2
+        assert [e["tool_use_id"] for e in parsed] == ["toolu_a", "toolu_b"]
+
+    def test_user_without_tool_result_returns_none(self) -> None:
+        line = json.dumps(
+            {
+                "type": "user",
+                "message": {"content": [{"type": "text", "text": "plain user text"}]},
+            }
+        )
+        assert parse_stream_json_line(line) is None
+
+    def test_user_string_content_returns_none(self) -> None:
+        line = json.dumps({"type": "user", "message": {"content": "just a string"}})
+        assert parse_stream_json_line(line) is None
 
 
 class TestParseStreamEvent:

@@ -69,6 +69,8 @@ class StreamEvent(BaseModel):
     # tool_result
     tool_result: str | None = None
     tool_is_error: bool | None = None
+    # tool_use / tool_result pairing
+    tool_use_id: str | None = None
     # init
     model: str | None = None
     session_id: str | None = None

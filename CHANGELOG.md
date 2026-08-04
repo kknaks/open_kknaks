@@ -4,6 +4,16 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.0] — 2026-08-04
+
+### Fixed
+
+- **tool_result 스트림 이벤트가 전부 유실되던 버그 수정.** Claude Code CLI 의 stream-json 은 도구 실행 결과를 최상위 `type:"tool_result"` 메시지가 아니라 `type:"user"` 메시지의 content 블록(`{"type":"tool_result","tool_use_id":...,"content":...,"is_error":...}`)으로 보냅니다. 파서에 `user` 분기가 없어 이 메시지가 전부 무시되어, 스트림에 tool_result 청크가 0건이었습니다(도구 실행 결과·성공/실패 여부 유실). 파서에 `user` 분기를 추가해 tool_result 블록마다 이벤트를 생성합니다 (content 는 str/list 모두 처리). 기존 최상위 `tool_result` 분기는 하위호환으로 유지됩니다.
+
+### Added
+
+- **`StreamEvent.tool_use_id` 필드 (optional).** `tool_use` 이벤트(assistant 블록의 `id`)와 `tool_result` 이벤트(블록의 `tool_use_id`)가 같은 id 를 실어, 소비자가 도구 호출과 결과를 짝지을 수 있습니다.
+
 ## [2.0.1] — 2026-05-12
 
 ### Fixed

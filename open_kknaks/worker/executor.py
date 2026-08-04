@@ -280,6 +280,7 @@ class ClaudeCodeExecutor:
                         type="tool_use",
                         tool_name=event_data.get("tool_name"),
                         tool_input=tool_input if isinstance(tool_input, dict) else None,
+                        tool_use_id=event_data.get("tool_use_id"),
                     )
                 )
 
@@ -289,6 +290,7 @@ class ClaudeCodeExecutor:
                         type="tool_result",
                         tool_result=event_data.get("tool_result"),
                         tool_is_error=event_data.get("tool_is_error"),
+                        tool_use_id=event_data.get("tool_use_id"),
                     )
                 )
 

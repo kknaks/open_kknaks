@@ -22,8 +22,8 @@ def parse_stream_json_line(line: str) -> dict[str, Any] | list[dict[str, Any]] |
         {"type": "text", "source": "result" | "assistant" | "delta", "content": str}
         {"type": "cost", "cost_usd": float, "input_tokens": int, ...}
         {"type": "retry", "error": str, "error_status": int | None, ...}
-        {"type": "tool_use", "tool_name": str, "tool_input": dict}
-        {"type": "tool_result", "tool_result": str, "tool_is_error": bool}
+        {"type": "tool_use", "tool_name": str, "tool_input": dict, "tool_use_id": str | None}
+        {"type": "tool_result", "tool_result": str, "tool_is_error": bool, "tool_use_id": str | None}
         {"type": "thinking", "content": str}
         {"type": "init", "model": str, "session_id": str}
         {"type": "progress", "total_tokens": int, "tool_uses": int, ...}
@@ -103,6 +103,7 @@ def parse_stream_json_line(line: str) -> dict[str, Any] | list[dict[str, Any]] |
                             "type": "tool_use",
                             "tool_name": block.get("name", ""),
                             "tool_input": block.get("input", {}),
+                            "tool_use_id": block.get("id"),
                         }
                     )
                 elif block_type == "thinking":
@@ -115,7 +116,30 @@ def parse_stream_json_line(line: str) -> dict[str, Any] | list[dict[str, Any]] |
             return None
         return events[0] if len(events) == 1 else events
 
-    # --- Tool result (separate message) ---
+    # --- User message (tool results arrive as user-role content blocks) ---
+    elif msg_type == "user":
+        content = obj.get("message", {}).get("content", [])
+        user_events: list[dict[str, Any]] = []
+        if isinstance(content, list):
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "tool_result":
+                    block_content = block.get("content", "")
+                    if isinstance(block_content, list):
+                        texts = [b.get("text", "") for b in block_content if isinstance(b, dict)]
+                        block_content = "\n".join(t for t in texts if t)
+                    user_events.append(
+                        {
+                            "type": "tool_result",
+                            "tool_result": str(block_content) if block_content else "",
+                            "tool_is_error": bool(block.get("is_error", False)),
+                            "tool_use_id": block.get("tool_use_id"),
+                        }
+                    )
+        if not user_events:
+            return None
+        return user_events[0] if len(user_events) == 1 else user_events
+
+    # --- Tool result (legacy top-level shape, kept for backward compatibility) ---
     elif msg_type == "tool_result":
         content = obj.get("content", "")
         if isinstance(content, list):
@@ -125,6 +149,7 @@ def parse_stream_json_line(line: str) -> dict[str, Any] | list[dict[str, Any]] |
             "type": "tool_result",
             "tool_result": str(content) if content else "",
             "tool_is_error": obj.get("is_error", False),
+            "tool_use_id": obj.get("tool_use_id"),
         }
 
     # --- System events (retry, init, progress, errors) ---
