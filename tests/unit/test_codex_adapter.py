@@ -80,6 +80,74 @@ class TestCodexCommand:
         assert cmd.count("--add-dir") == 2
         assert cmd.count("--config") == 1
 
+    def test_resume_omits_flags_the_subcommand_rejects(self) -> None:
+        """Regression: `codex exec resume` takes a strict subset of `codex exec` flags.
+
+        Emitting any of these made every resume submission die with exit 2
+        ("unexpected argument"). Measured against codex-cli 0.146.0.
+        """
+        adapter = CodexRunnerAdapter()
+        task = Task(
+            prompt="continue",
+            provider="codex",
+            model="gpt-5.4",
+            options={"resume": {"mode": "session", "session_id": "thread-1"}, "cwd": "/srv/work"},
+            provider_options={
+                "sandbox": "read-only",
+                "color": "never",
+                "profile": "p",
+                "profile_v2": "p2",
+                "local_provider": "lp",
+                "oss": True,
+                "add_dirs": ["/tmp/a"],
+                "skip_git_repo_check": True,
+                "config": ["model_reasoning_effort=high"],
+            },
+        )
+        cmd = adapter._build_command(task)
+
+        rejected = ("--sandbox", "--cd", "--add-dir", "--color", "--profile", "--profile-v2", "--local-provider")
+        for flag in (*rejected, "--oss"):
+            assert flag not in cmd, f"{flag} is rejected by `codex exec resume`"
+
+        # ...while everything resume *does* accept still gets through.
+        assert cmd[:5] == ["codex", "exec", "resume", "thread-1", "--json"]
+        assert "--skip-git-repo-check" in cmd
+        assert "--config" in cmd
+        assert cmd[cmd.index("--model") + 1] == "gpt-5.4"
+        assert cmd[-1] == "continue"
+
+    def test_resume_last_omits_flags_the_subcommand_rejects(self) -> None:
+        adapter = CodexRunnerAdapter()
+        task = Task(
+            prompt="continue",
+            provider="codex",
+            options={"resume": {"mode": "last"}, "cwd": "/srv/work"},
+        )
+        cmd = adapter._build_command(task)
+        # The workspace-write default must not leak into resume either.
+        assert "--sandbox" not in cmd
+        assert "--cd" not in cmd
+        assert cmd == ["codex", "exec", "resume", "--last", "--json", "continue"]
+
+    def test_new_session_still_emits_sandbox_cd_and_model(self) -> None:
+        """The suppression must be scoped to resume — new sessions are unchanged."""
+        adapter = CodexRunnerAdapter()
+        task = Task(
+            prompt="run",
+            provider="codex",
+            model="gpt-5.4",
+            options={"cwd": "/srv/work"},
+            provider_options={"color": "never", "add_dirs": ["/tmp/a"], "oss": True},
+        )
+        cmd = adapter._build_command(task)
+        assert cmd[cmd.index("--sandbox") + 1] == "workspace-write"
+        assert cmd[cmd.index("--cd") + 1] == "/srv/work"
+        assert cmd[cmd.index("--model") + 1] == "gpt-5.4"
+        assert "--color" in cmd
+        assert "--add-dir" in cmd
+        assert "--oss" in cmd
+
     @pytest.mark.parametrize(
         ("task", "message"),
         [

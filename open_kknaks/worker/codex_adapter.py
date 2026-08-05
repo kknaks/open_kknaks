@@ -38,6 +38,15 @@ CODEX_ALLOWED_PROVIDER_OPTIONS = frozenset(
     }
 )
 
+# `codex exec resume` accepts a strict subset of `codex exec` flags. Passing any of these
+# makes the CLI exit 2 with "unexpected argument" before the session is even loaded, so
+# they are dropped in resume mode rather than forwarded. (Measured on codex-cli 0.146.0;
+# `--model`, `--skip-git-repo-check`, `--ephemeral`, `--config`, `--image`,
+# `--output-last-message`, `--output-schema` and the remaining options *are* accepted.)
+CODEX_RESUME_UNSUPPORTED_OPTIONS = frozenset(
+    {"sandbox", "add_dirs", "color", "profile", "profile_v2", "local_provider", "oss"}
+)
+
 # Codex item types that map to tool_use / tool_result stream events.
 CODEX_TOOL_ITEM_TYPES = frozenset({"command_execution", "mcp_tool_call", "collab_tool_call", "web_search"})
 
@@ -99,6 +108,7 @@ class CodexRunnerAdapter:
 
         resume = task.options.get("resume", {})
         mode = resume.get("mode", "new") if isinstance(resume, dict) else "new"
+        is_resume = mode in {"session", "last"}
 
         cmd = [self.codex_bin, "exec"]
         if mode == "session":
@@ -112,11 +122,18 @@ class CodexRunnerAdapter:
             cmd.extend(["--model", task.model])
 
         cwd = task.options.get("cwd")
-        if isinstance(cwd, str) and cwd:
+        # `--cd` is rejected by the resume subcommand; a resumed session keeps its own cwd.
+        if isinstance(cwd, str) and cwd and not is_resume:
             cmd.extend(["--cd", cwd])
 
         provider_options = dict(task.provider_options)
-        sandbox = provider_options.pop("sandbox", "workspace-write")
+        if is_resume:
+            for key in CODEX_RESUME_UNSUPPORTED_OPTIONS:
+                provider_options.pop(key, None)
+
+        # In resume mode the key is already gone and the default is empty, so no
+        # `--sandbox` is emitted; a resumed session reuses the sandbox it was created with.
+        sandbox = provider_options.pop("sandbox", "" if is_resume else "workspace-write")
         if sandbox:
             cmd.extend(["--sandbox", str(sandbox)])
 
