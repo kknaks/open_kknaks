@@ -31,12 +31,16 @@ class RedisBroker(AbstractBroker):
         url: str = "redis://localhost:6379",
         namespace: str = "open_kknaks",
         result_ttl: int = 3600,
+        dlq_ttl: int = 7 * 24 * 3600,
         stream_maxlen: int = 1000,
     ) -> None:
         self._redis: Any = redis
         self._url = url
         self._namespace = namespace
         self._result_ttl = result_ttl
+        # Failed tasks are kept longer than successful ones: the DLQ is only useful if
+        # the task data behind it survives long enough to inspect and retry.
+        self._dlq_ttl = dlq_ttl
         self._stream_maxlen = stream_maxlen
 
         # Lua script objects (loaded on connect)
@@ -88,6 +92,7 @@ class RedisBroker(AbstractBroker):
                 self._key("task", task.id),
                 self._key("queue", task.queue),
                 self._key("queue", f"{task.queue}.delayed"),
+                self._key("stream", task.id),
             ],
             args=[task.id, task_json, score, delay_score],
         )
@@ -116,6 +121,7 @@ class RedisBroker(AbstractBroker):
             keys=[
                 self._key("queue", f"{queue_name}.active"),
                 self._key("task", task_id),
+                self._key("stream", task_id),
             ],
             args=[task_id, self._result_ttl],
         )
@@ -125,8 +131,10 @@ class RedisBroker(AbstractBroker):
             keys=[
                 self._key("queue", f"{queue_name}.active"),
                 self._key("queue", f"{queue_name}.dlq"),
+                self._key("task", task_id),
+                self._key("stream", task_id),
             ],
-            args=[task_id],
+            args=[task_id, self._dlq_ttl],
         )
 
     async def requeue(self, queue_name: str, task_ids: list[str]) -> None:

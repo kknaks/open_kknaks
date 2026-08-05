@@ -4,6 +4,24 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.1] — 2026-08-05
+
+### Fixed
+
+- **codex provider 의 tool 이벤트에 `tool_use_id` 가 채워지지 않던 버그 수정.** 2.1.0 의 `tool_use_id` 는 claude 파서(`stream_parser.py`) 전용이라, `CodexRunnerAdapter` 가 만드는 `tool_use`/`tool_result` 이벤트는 항상 `tool_use_id=None` 이었습니다(소비자가 도구 호출과 결과를 짝지을 수 없음). 이제 codex 이벤트의 `item.id` 를 실어 보냅니다 — `item.started` 와 `item.completed` 가 같은 id 를 쓰므로 claude 경로와 동형으로 짝지어집니다.
+- **codex 0.146 의 flat item 을 파싱하지 못해 tool 이벤트가 아예 유실되던 버그 수정.** 어댑터는 tool payload 가 `item.details` 에 중첩된 형태만 인식했지만, 실제 `codex exec --json` (0.146.0 실측)은 `{"id","type":"command_execution","command",...}` 처럼 `item` 최상위에 flat 하게 보냅니다. 그래서 도구 실행이 전부 `progress` 이벤트로 떨어지고 `tool_use`/`tool_result` 는 0건이었습니다. 이제 flat/중첩 두 모양을 모두 지원하고, 결과 텍스트는 `aggregated_output` 도 읽으며, `exit_code`/`status` 로 `tool_is_error` 를 판정합니다.
+- **`{ns}:stream:{task_id}` 키가 TTL 없이 영구히 쌓이던 누수 수정.** `{ns}:task:{id}` 는 ack 시 `result_ttl` EXPIRE 가 걸렸지만 stream 키는 어떤 경로에서도 만료되지 않아 TTL=-1 로 단조 증가했습니다. ack 시 stream 키에도 `result_ttl` EXPIRE 를 겁니다. 종결(ack/nack) 시점에만 걸므로 소비 중인 스트림이 잘리지 않습니다.
+- **nack(실패) 태스크의 task/stream 키에도 TTL 적용.** 기존에는 DLQ 로 간 태스크의 키가 무기한 남았습니다. 이제 새 `dlq_ttl` (기본 7일) 로 만료되며, DLQ 조회·재시도에 필요한 시간을 확보하려고 `result_ttl` 보다 길게 잡았습니다.
+
+### Added
+
+- `RedisBroker(dlq_ttl=...)` 파라미터 (기본 `7 * 24 * 3600`). 실패 태스크의 task/stream 키 보존 기간.
+
+### Internal
+
+- `enqueue.lua` 가 task/stream 키에 `PERSIST` 를 겁니다. `HSET`/`XADD` 는 기존 TTL 을 지우지 않으므로, DLQ 재시도된 태스크가 실행 도중 만료되는 것을 막습니다.
+- codex `item.updated` 는 더 이상 `tool_result` 를 만들지 않습니다 (중간 스냅샷이라 같은 `tool_use_id` 로 중복 결과가 나갔습니다). `progress` 이벤트로 나갑니다.
+
 ## [2.1.0] — 2026-08-04
 
 ### Fixed

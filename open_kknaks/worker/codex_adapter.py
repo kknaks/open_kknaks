@@ -38,6 +38,9 @@ CODEX_ALLOWED_PROVIDER_OPTIONS = frozenset(
     }
 )
 
+# Codex item types that map to tool_use / tool_result stream events.
+CODEX_TOOL_ITEM_TYPES = frozenset({"command_execution", "mcp_tool_call", "collab_tool_call", "web_search"})
+
 
 class CodexRunnerAdapter:
     """Codex provider adapter using `codex exec --json` JSONL output."""
@@ -179,37 +182,73 @@ class CodexRunnerAdapter:
             duration_ms=int(usage.get("duration_ms", 0) or 0),
         )
 
+    def _tool_is_error(self, payload: dict[str, Any]) -> bool | None:
+        if "is_error" in payload:
+            is_error = payload["is_error"]
+            return bool(is_error) if is_error is not None else None
+        exit_code = payload.get("exit_code")
+        if isinstance(exit_code, int):
+            return exit_code != 0
+        status = payload.get("status")
+        if isinstance(status, str) and status in {"failed", "error"}:
+            return True
+        return None
+
     def _events_from_item(self, event: dict[str, Any]) -> list[StreamEvent]:
         item = event.get("item")
         if not isinstance(item, dict):
             return [StreamEvent(type="progress", description=str(event.get("type", "")))]
-        item_type = item.get("type")
-        if item_type == "agent_message":
-            return [StreamEvent(type="text", text=str(item.get("text") or ""))]
-        if item_type == "reasoning":
-            return [StreamEvent(type="thinking", text=str(item.get("text") or item.get("summary") or ""))]
 
+        # `item.id` is stable across item.started / item.updated / item.completed for the
+        # same item, so it is what pairs a tool_use with its tool_result.
+        item_id = item.get("id")
+        tool_use_id = str(item_id) if item_id else None
+
+        # codex >= 0.146 emits a flat item ({"id", "type", "command", ...}); older builds
+        # nest the same payload under `item.details`. Support both.
         details = item.get("details")
-        if not isinstance(details, dict):
-            return [StreamEvent(type="progress", description=str(event.get("type", "")))]
+        payload = details if isinstance(details, dict) else item
+        payload_type = payload.get("type")
 
-        detail_type = details.get("type")
-        if detail_type == "agent_message":
-            text = details.get("text") or details.get("message") or ""
-            return [StreamEvent(type="text", text=str(text))]
-        if detail_type == "reasoning":
-            text = details.get("text") or details.get("summary") or ""
-            return [StreamEvent(type="thinking", text=str(text))]
-        if detail_type in {"command_execution", "mcp_tool_call", "collab_tool_call", "web_search"}:
-            name = details.get("name") or details.get("command") or detail_type
-            if event.get("type") == "item.started":
-                return [StreamEvent(type="tool_use", tool_name=str(name), tool_input=details)]
-            result = details.get("output") or details.get("result") or details.get("text") or ""
-            return [StreamEvent(type="tool_result", tool_result=str(result), tool_is_error=details.get("is_error"))]
-        if detail_type in {"file_change", "todo_list"}:
-            return [StreamEvent(type="progress", description=str(detail_type))]
+        if payload_type == "agent_message":
+            return [StreamEvent(type="text", text=str(payload.get("text") or payload.get("message") or ""))]
+        if payload_type == "reasoning":
+            return [StreamEvent(type="thinking", text=str(payload.get("text") or payload.get("summary") or ""))]
+        if payload_type in CODEX_TOOL_ITEM_TYPES:
+            event_type = event.get("type")
+            if event_type == "item.started":
+                name = payload.get("name") or payload.get("command") or payload_type
+                return [
+                    StreamEvent(
+                        type="tool_use",
+                        tool_name=str(name),
+                        tool_input=payload,
+                        tool_use_id=tool_use_id,
+                    )
+                ]
+            if event_type == "item.completed":
+                result = (
+                    payload.get("aggregated_output")
+                    or payload.get("output")
+                    or payload.get("result")
+                    or payload.get("text")
+                    or ""
+                )
+                return [
+                    StreamEvent(
+                        type="tool_result",
+                        tool_result=str(result),
+                        tool_is_error=self._tool_is_error(payload),
+                        tool_use_id=tool_use_id,
+                    )
+                ]
+            # item.updated is an in-progress snapshot, not a result — do not emit a
+            # second tool_result under the same tool_use_id.
+            return [StreamEvent(type="progress", description=str(payload_type), tool_use_id=tool_use_id)]
+        if payload_type in {"file_change", "todo_list"}:
+            return [StreamEvent(type="progress", description=str(payload_type))]
 
-        return [StreamEvent(type="progress", description=str(detail_type or event.get("type", "")))]
+        return [StreamEvent(type="progress", description=str(payload_type or event.get("type", "")))]
 
     def _parse_json_event(
         self,

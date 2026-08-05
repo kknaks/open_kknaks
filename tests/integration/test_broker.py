@@ -314,6 +314,71 @@ class TestStreaming:
         assert len(entries) == 1
 
 
+class TestTerminalKeyTTL:
+    """Regression: task/stream keys used to live forever (TTL=-1) and leak."""
+
+    @pytest.mark.asyncio
+    async def test_ack_expires_task_and_stream_keys(self, broker: RedisBroker) -> None:
+        task = Task(prompt="test", queue="default")
+        await broker.enqueue(task)
+        await broker.dequeue(["default"], timeout=0)
+        await broker.publish_chunk(task.id, StreamEvent(type="text", text="hi"))
+
+        # Before ack both keys are persistent — the stream must not be cut mid-consumption.
+        assert await broker.redis.ttl(broker._key("task", task.id)) == -1
+        assert await broker.redis.ttl(broker._key("stream", task.id)) == -1
+
+        await broker.ack("default", task.id)
+
+        task_ttl = await broker.redis.ttl(broker._key("task", task.id))
+        stream_ttl = await broker.redis.ttl(broker._key("stream", task.id))
+        assert 0 < task_ttl <= broker._result_ttl
+        assert 0 < stream_ttl <= broker._result_ttl
+
+    @pytest.mark.asyncio
+    async def test_nack_expires_task_and_stream_keys_with_dlq_ttl(self, broker: RedisBroker) -> None:
+        task = Task(prompt="test", queue="default")
+        await broker.enqueue(task)
+        await broker.dequeue(["default"], timeout=0)
+        await broker.publish_chunk(task.id, StreamEvent(type="text", text="hi"))
+
+        await broker.nack("default", task.id)
+
+        task_ttl = await broker.redis.ttl(broker._key("task", task.id))
+        stream_ttl = await broker.redis.ttl(broker._key("stream", task.id))
+        # Failed tasks outlive successful ones so the DLQ stays inspectable.
+        assert broker._result_ttl < task_ttl <= broker._dlq_ttl
+        assert broker._result_ttl < stream_ttl <= broker._dlq_ttl
+
+        # ...and the task is still readable, so list_dlq/retry_from_dlq keep working.
+        assert len(await broker.list_dlq("default")) == 1
+
+    @pytest.mark.asyncio
+    async def test_ack_on_task_without_stream_is_noop(self, broker: RedisBroker) -> None:
+        task = Task(prompt="no chunks", queue="default")
+        await broker.enqueue(task)
+        await broker.dequeue(["default"], timeout=0)
+
+        await broker.ack("default", task.id)
+
+        # -2 == key does not exist; EXPIRE on a missing key must not raise.
+        assert await broker.redis.ttl(broker._key("stream", task.id)) == -2
+
+    @pytest.mark.asyncio
+    async def test_retry_from_dlq_clears_ttl(self, broker: RedisBroker) -> None:
+        task = Task(prompt="retry me", queue="default")
+        await broker.enqueue(task)
+        await broker.dequeue(["default"], timeout=0)
+        await broker.publish_chunk(task.id, StreamEvent(type="text", text="hi"))
+        await broker.nack("default", task.id)
+
+        await broker.retry_from_dlq("default", task.id)
+
+        # A re-queued task must never expire mid-flight.
+        assert await broker.redis.ttl(broker._key("task", task.id)) == -1
+        assert await broker.redis.ttl(broker._key("stream", task.id)) == -1
+
+
 class TestRequeue:
     @pytest.mark.asyncio
     async def test_requeue_returns_to_queue(self, broker: RedisBroker) -> None:

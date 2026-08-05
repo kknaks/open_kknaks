@@ -180,6 +180,119 @@ class TestCodexEventParsing:
         assert completed[0].tool_result == "ok"
 
 
+# Verbatim `codex exec --json` output from codex-cli 0.146.0.
+REAL_COMMAND_STARTED = {
+    "type": "item.started",
+    "item": {
+        "id": "item_1",
+        "type": "command_execution",
+        "command": "/bin/zsh -lc 'echo hello-from-codex'",
+        "aggregated_output": "",
+        "exit_code": None,
+        "status": "in_progress",
+    },
+}
+REAL_COMMAND_COMPLETED = {
+    "type": "item.completed",
+    "item": {
+        "id": "item_1",
+        "type": "command_execution",
+        "command": "/bin/zsh -lc 'echo hello-from-codex'",
+        "aggregated_output": "hello-from-codex\n",
+        "exit_code": 0,
+        "status": "completed",
+    },
+}
+
+
+class TestCodexToolUseId:
+    """Regression: codex tool events carried tool_use_id=None, so callers could not
+    pair a tool call with its result."""
+
+    def test_flat_command_execution_emits_paired_tool_events(self) -> None:
+        adapter = CodexRunnerAdapter()
+        started, *_ = adapter._parse_json_event(REAL_COMMAND_STARTED)
+        completed, *_ = adapter._parse_json_event(REAL_COMMAND_COMPLETED)
+
+        assert started[0].type == "tool_use"
+        assert started[0].tool_name == "/bin/zsh -lc 'echo hello-from-codex'"
+        assert completed[0].type == "tool_result"
+        assert completed[0].tool_result == "hello-from-codex\n"
+        # Same item id on both sides — this is what makes them pairable.
+        assert started[0].tool_use_id == "item_1"
+        assert completed[0].tool_use_id == "item_1"
+
+    def test_exit_code_maps_to_tool_is_error(self) -> None:
+        adapter = CodexRunnerAdapter()
+        ok, *_ = adapter._parse_json_event(REAL_COMMAND_COMPLETED)
+        assert ok[0].tool_is_error is False
+
+        failed_event = {
+            "type": "item.completed",
+            "item": {
+                "id": "item_2",
+                "type": "command_execution",
+                "command": "false",
+                "aggregated_output": "boom",
+                "exit_code": 1,
+                "status": "failed",
+            },
+        }
+        failed, *_ = adapter._parse_json_event(failed_event)
+        assert failed[0].tool_is_error is True
+        assert failed[0].tool_use_id == "item_2"
+
+    def test_nested_details_shape_also_carries_tool_use_id(self) -> None:
+        adapter = CodexRunnerAdapter()
+        started, *_ = adapter._parse_json_event(
+            {
+                "type": "item.started",
+                "item": {"id": "item_7", "details": {"type": "mcp_tool_call", "name": "search"}},
+            }
+        )
+        completed, *_ = adapter._parse_json_event(
+            {
+                "type": "item.completed",
+                "item": {
+                    "id": "item_7",
+                    "details": {"type": "mcp_tool_call", "name": "search", "output": "hits", "is_error": False},
+                },
+            }
+        )
+
+        assert started[0].type == "tool_use"
+        assert started[0].tool_use_id == "item_7"
+        assert completed[0].type == "tool_result"
+        assert completed[0].tool_result == "hits"
+        assert completed[0].tool_is_error is False
+        assert completed[0].tool_use_id == "item_7"
+
+    def test_item_updated_does_not_emit_duplicate_tool_result(self) -> None:
+        adapter = CodexRunnerAdapter()
+        updated, *_ = adapter._parse_json_event(
+            {
+                "type": "item.updated",
+                "item": {
+                    "id": "item_1",
+                    "type": "command_execution",
+                    "command": "sleep 1",
+                    "aggregated_output": "partial",
+                    "status": "in_progress",
+                },
+            }
+        )
+        assert updated[0].type == "progress"
+        assert updated[0].tool_use_id == "item_1"
+
+    def test_item_without_id_leaves_tool_use_id_none(self) -> None:
+        adapter = CodexRunnerAdapter()
+        started, *_ = adapter._parse_json_event(
+            {"type": "item.started", "item": {"details": {"type": "command_execution", "command": "ls"}}}
+        )
+        assert started[0].type == "tool_use"
+        assert started[0].tool_use_id is None
+
+
 class TestCodexExecute:
     @pytest.mark.asyncio
     async def test_execute_parses_stdout_jsonl(self, monkeypatch: pytest.MonkeyPatch) -> None:
