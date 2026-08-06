@@ -234,7 +234,14 @@ class CodexRunnerAdapter:
         if payload_type in CODEX_TOOL_ITEM_TYPES:
             event_type = event.get("type")
             if event_type == "item.started":
-                name = payload.get("name") or payload.get("command") or payload_type
+                # mcp_tool_call 은 실제 툴명이 `tool` 에 실린다 — 타입명 폴백은 소비자의
+                # 카탈로그 표시명 매칭을 전부 깨뜨린다(2026-08-06 mediness P8 실측).
+                name = (
+                    payload.get("name")
+                    or payload.get("tool")
+                    or payload.get("command")
+                    or payload_type
+                )
                 return [
                     StreamEvent(
                         type="tool_use",
