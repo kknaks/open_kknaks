@@ -313,6 +313,10 @@ class CodexRunnerAdapter:
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                # MCP tool 결과가 JSONL 한 줄로 오므로 asyncio 기본 64KiB 줄 한계를 넘기면
+                # readline() 이 ValueError("Separator is found, but chunk is longer than limit") 로
+                # 태스크를 죽인다(2026-08-06 mediness P8 실측 — 태스크 목록 결과에서 재현).
+                limit=10 * 1024 * 1024,
             )
         except FileNotFoundError as exc:
             return TaskResult(exit_code=127, debug_context=str(exc))
