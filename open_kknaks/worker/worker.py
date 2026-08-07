@@ -1,8 +1,10 @@
 """ClaudeWorker — dequeue tasks and execute via PTY."""
 
 import asyncio
+import contextlib
 import signal
 import uuid
+from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
 
 import structlog
@@ -47,6 +49,10 @@ class ClaudeWorker:
 
         self.stale_timeout = 60.0
         self.maintenance_interval = 30.0
+        # How often a running task re-checks the broker for a cancellation request, and
+        # how long the terminated process is given to unwind before we stop waiting.
+        self.cancel_poll_interval = 1.0
+        self.cancel_grace_period = 5.0
 
         self._adapters: dict[str, RunnerAdapter] = {
             PROVIDER_CLAUDE: ClaudeRunnerAdapter(self.config),
@@ -261,6 +267,75 @@ class ClaudeWorker:
                 logger.error("maintenance.error", exc_info=True)
                 await asyncio.sleep(self.maintenance_interval)
 
+    async def _watch_for_cancel(self, task_id: str) -> None:
+        """Return once the broker reports this task as CANCELLED.
+
+        Polling, not pub/sub, on purpose:
+
+        - The task hash is the authoritative cancellation record — `ClaudeClient.cancel`
+          only writes there — so polling it cannot disagree with the source of truth.
+        - Redis pub/sub is at-most-once and has no backlog. A message published while the
+          worker was reconnecting would be lost and the process would run to completion,
+          which is exactly the failure being fixed here.
+        - It also catches a cancel that landed before this watcher started.
+
+        The cost is one HGET per in-flight task per interval, which is negligible beside a
+        CLI run, and it mirrors how `subscribe_chunks` already polls task status when the
+        stream goes idle.
+        """
+        while True:
+            await asyncio.sleep(self.cancel_poll_interval)
+            try:
+                current = await self.broker.get_task(task_id)
+            except Exception:
+                # A transient broker error must not tear down a healthy run; try again.
+                logger.warning("task.cancel_poll_failed", task_id=task_id, exc_info=True)
+                continue
+            if current is not None and current.status == TaskStatus.CANCELLED:
+                return
+
+    async def _execute_watching_for_cancel(
+        self,
+        adapter: RunnerAdapter,
+        task: Task,
+        config: ClaudeConfig,
+        on_chunk: Callable[[StreamEvent], Awaitable[None]],
+    ) -> TaskResult:
+        """Run the adapter, killing its process if the task gets cancelled mid-flight.
+
+        Raises TaskCancelledError on cancellation so `_process_task` takes its existing
+        cancellation branch (status=CANCELLED + ack). Without this the terminated process
+        would surface as a non-zero exit code and be recorded as FAILED, then nacked to the
+        DLQ — the wrong status for a user-requested stop.
+        """
+        exec_task = asyncio.create_task(adapter.execute(task=task, config=config, on_chunk=on_chunk))
+        watch_task = asyncio.create_task(self._watch_for_cancel(task.id))
+
+        try:
+            done, _pending = await asyncio.wait({exec_task, watch_task}, return_when=asyncio.FIRST_COMPLETED)
+
+            # If the run finished on its own, report its real outcome even when a cancel
+            # landed in the same instant — there is no longer a process to stop.
+            if exec_task in done:
+                return await exec_task
+
+            logger.info("task.cancel_detected", task_id=task.id, provider=task.provider)
+            await adapter.cancel(task.id)
+
+            # Let the adapter reap the terminated process so its own bookkeeping (fd close,
+            # waitpid) runs. asyncio.wait never cancels, so a slow unwind just times out.
+            await asyncio.wait({exec_task}, timeout=self.cancel_grace_period)
+
+            raise TaskCancelledError(f"Task {task.id} cancelled while running")
+        finally:
+            watch_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await watch_task
+            if not exec_task.done():
+                exec_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await exec_task
+
     async def _process_task(self, task: Task) -> None:
         """Execute task with full middleware chain."""
         called_middlewares: list[Middleware] = []
@@ -299,7 +374,8 @@ class ClaudeWorker:
             async def _on_chunk(chunk: StreamEvent) -> None:
                 await self.broker.publish_chunk(task.id, chunk)
 
-            result = await adapter.execute(
+            result = await self._execute_watching_for_cancel(
+                adapter=adapter,
                 task=task,
                 config=config,
                 on_chunk=_on_chunk,

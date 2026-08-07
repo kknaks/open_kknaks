@@ -4,6 +4,21 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **실행 중인 태스크를 취소해도 CLI 프로세스가 죽지 않던 버그 수정.** `AgentClient.cancel` 은 broker 에 `status=CANCELLED` 를 기록할 뿐이고, 워커는 그 상태를 dequeue 직후 **1회만** 확인한 뒤 `adapter.execute` 를 await 하는 동안에는 다시 보지 않았습니다. `adapter.cancel`(process.terminate 경로)은 존재했지만 호출처가 워커 종료 cleanup 뿐이라, 이미 running 인 실행은 어떤 신호로도 멈출 수 없었습니다(실측: 취소 27초 뒤까지 codex 가 계속 툴을 호출하며 토큰 낭비). 이제 실행 중 broker 의 태스크 상태를 주기적으로 확인해 CANCELLED 를 감지하면 `adapter.cancel` 로 프로세스를 종료합니다.
+- **취소된 태스크가 DLQ 로 가던 문제 수정.** 종료된 프로세스는 non-zero exit code 로 끝나므로 기존 경로에서는 FAILED 로 기록돼 nack → DLQ 로 밀려났습니다. 이제 실행 중 취소는 기존 `TaskCancelledError` 경로를 타서 `status=CANCELLED` + ack 으로 정리됩니다. 스트림 소비자의 종료 계약(«이벤트 공백 + status done/failed/cancelled»)은 그대로입니다.
+
+### Added
+
+- `ClaudeWorker.cancel_poll_interval` (기본 1.0초), `ClaudeWorker.cancel_grace_period` (기본 5.0초) 속성. 기존 `stale_timeout`/`maintenance_interval` 과 같은 방식으로 인스턴스에서 조정합니다.
+
+### Internal
+
+- 취소 감지는 pub/sub 이 아니라 **폴링**입니다. 태스크 해시가 취소의 단일 진실 공급원이고(`AgentClient.cancel` 이 거기에만 씁니다), Redis pub/sub 은 at-most-once 라 재연결 중 발행된 메시지를 놓치면 프로세스가 영원히 남습니다 — 지금 고치려는 그 실패 모드입니다. 폴링은 워처가 뜨기 전에 도착한 취소도 잡습니다. 비용은 in-flight 태스크당 주기 1회 HGET 으로, CLI 실행 비용에 비하면 무시할 수준이고 `subscribe_chunks` 가 이미 같은 방식으로 상태를 폴링합니다.
+
 ## [2.1.1] — 2026-08-05
 
 ### Fixed
