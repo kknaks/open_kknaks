@@ -228,6 +228,78 @@ class TestCodexEventParsing:
         assert usage.output_tokens == 5
         assert session_id is None
 
+    def test_real_turn_completed_usage_maps_all_five_keys(self) -> None:
+        """Regression: the adapter looked up `cache_read_tokens`/`cache_write_tokens`,
+        which codex never emits, so cache and reasoning accounting was always 0.
+
+        Payload is verbatim `codex exec --json` output from codex-cli 0.146.0.
+        """
+        adapter = CodexRunnerAdapter()
+        _, _, usage, _ = adapter._parse_json_event(
+            {
+                "type": "turn.completed",
+                "usage": {
+                    "input_tokens": 15059,
+                    "cached_input_tokens": 11008,
+                    "cache_write_input_tokens": 0,
+                    "output_tokens": 5,
+                    "reasoning_output_tokens": 0,
+                },
+            }
+        )
+        assert usage is not None
+        assert usage.input_tokens == 15059
+        assert usage.cache_read_tokens == 11008
+        assert usage.cache_write_tokens == 0
+        assert usage.output_tokens == 5
+        assert usage.reasoning_output_tokens == 0
+
+    def test_reasoning_and_cache_write_are_carried_when_nonzero(self) -> None:
+        adapter = CodexRunnerAdapter()
+        _, _, usage, _ = adapter._parse_json_event(
+            {
+                "type": "turn.completed",
+                "usage": {
+                    "input_tokens": 24763,
+                    "cached_input_tokens": 24448,
+                    "cache_write_input_tokens": 315,
+                    "output_tokens": 122,
+                    "reasoning_output_tokens": 64,
+                },
+            }
+        )
+        assert usage is not None
+        assert usage.cache_read_tokens == 24448
+        assert usage.cache_write_tokens == 315
+        assert usage.reasoning_output_tokens == 64
+
+    def test_legacy_usage_key_names_still_accepted(self) -> None:
+        """Fallback so a codex build emitting the older names keeps working."""
+        adapter = CodexRunnerAdapter()
+        _, _, usage, _ = adapter._parse_json_event(
+            {
+                "type": "turn.completed",
+                "usage": {
+                    "input_tokens": 10,
+                    "output_tokens": 5,
+                    "cache_read_tokens": 7,
+                    "cache_write_tokens": 3,
+                },
+            }
+        )
+        assert usage is not None
+        assert usage.cache_read_tokens == 7
+        assert usage.cache_write_tokens == 3
+        assert usage.reasoning_output_tokens == 0
+
+    def test_missing_usage_keys_default_to_zero(self) -> None:
+        adapter = CodexRunnerAdapter()
+        _, _, usage, _ = adapter._parse_json_event({"type": "turn.completed", "usage": {}})
+        assert usage is not None
+        assert usage.input_tokens == 0
+        assert usage.cache_read_tokens == 0
+        assert usage.reasoning_output_tokens == 0
+
     def test_command_execution_maps_to_tool_events(self) -> None:
         adapter = CodexRunnerAdapter()
         started, *_ = adapter._parse_json_event(

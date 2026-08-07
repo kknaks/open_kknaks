@@ -209,7 +209,8 @@ def _get_result_tool() -> Tool:
             "the task finishes or the timeout expires. "
             "Response JSON includes: status, result (output text), error, exit_code, "
             "session_id (for resuming with submit_task), and usage "
-            "(cost_usd, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, duration_ms)."
+            "(cost_usd, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, "
+            "reasoning_output_tokens, duration_ms)."
         ),
         inputSchema={
             "type": "object",

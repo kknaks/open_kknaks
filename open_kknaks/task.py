@@ -40,6 +40,9 @@ class TokenUsage(BaseModel):
     cache_read_tokens: int = 0
     cache_write_tokens: int = 0
     duration_ms: int = 0
+    # Reasoning tokens, reported by codex as `reasoning_output_tokens`. A subset of
+    # output_tokens, not an addition to it. Always 0 for providers that do not report it.
+    reasoning_output_tokens: int = 0
 
 
 class StreamEvent(BaseModel):

@@ -188,15 +188,39 @@ class CodexRunnerAdapter:
         return cmd
 
     def _usage_from_event(self, event: dict[str, Any]) -> TokenUsage | None:
+        """Map a `turn.completed` usage payload onto the shared TokenUsage model.
+
+        codex reports (measured on codex-cli 0.146.0)::
+
+            {"input_tokens": 15059, "cached_input_tokens": 11008,
+             "cache_write_input_tokens": 0, "output_tokens": 5,
+             "reasoning_output_tokens": 0}
+
+        The old `cache_read_tokens` / `cache_write_tokens` lookups matched none of these,
+        so cache accounting silently reported 0. The legacy names are kept as fallbacks
+        so a codex build that emits them still works.
+
+        Note the counts are *inclusive*: `cached_input_tokens` is part of `input_tokens`
+        and `reasoning_output_tokens` is part of `output_tokens` — do not add them up.
+        """
         usage = event.get("usage")
         if not isinstance(usage, dict):
             return None
+
+        def _int(*keys: str) -> int:
+            for key in keys:
+                value = usage.get(key)
+                if value is not None:
+                    return int(value)
+            return 0
+
         return TokenUsage(
-            input_tokens=int(usage.get("input_tokens", 0) or 0),
-            output_tokens=int(usage.get("output_tokens", 0) or 0),
-            cache_read_tokens=int(usage.get("cache_read_tokens", 0) or 0),
-            cache_write_tokens=int(usage.get("cache_write_tokens", 0) or 0),
-            duration_ms=int(usage.get("duration_ms", 0) or 0),
+            input_tokens=_int("input_tokens"),
+            output_tokens=_int("output_tokens"),
+            cache_read_tokens=_int("cached_input_tokens", "cache_read_tokens"),
+            cache_write_tokens=_int("cache_write_input_tokens", "cache_write_tokens"),
+            reasoning_output_tokens=_int("reasoning_output_tokens"),
+            duration_ms=_int("duration_ms"),
         )
 
     def _tool_is_error(self, payload: dict[str, Any]) -> bool | None:

@@ -12,11 +12,13 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 - **codex 0.146 의 flat item 을 파싱하지 못해 tool 이벤트가 아예 유실되던 버그 수정.** 어댑터는 tool payload 가 `item.details` 에 중첩된 형태만 인식했지만, 실제 `codex exec --json` (0.146.0 실측)은 `{"id","type":"command_execution","command",...}` 처럼 `item` 최상위에 flat 하게 보냅니다. 그래서 도구 실행이 전부 `progress` 이벤트로 떨어지고 `tool_use`/`tool_result` 는 0건이었습니다. 이제 flat/중첩 두 모양을 모두 지원하고, 결과 텍스트는 `aggregated_output` 도 읽으며, `exit_code`/`status` 로 `tool_is_error` 를 판정합니다.
 - **`{ns}:stream:{task_id}` 키가 TTL 없이 영구히 쌓이던 누수 수정.** `{ns}:task:{id}` 는 ack 시 `result_ttl` EXPIRE 가 걸렸지만 stream 키는 어떤 경로에서도 만료되지 않아 TTL=-1 로 단조 증가했습니다. ack 시 stream 키에도 `result_ttl` EXPIRE 를 겁니다. 종결(ack/nack) 시점에만 걸므로 소비 중인 스트림이 잘리지 않습니다.
 - **codex resume 제출이 항상 exit 2 로 죽던 버그 수정.** `codex exec resume` 는 `codex exec` 플래그의 진부분집합만 받는데, 어댑터가 resume 모드에서도 sandbox 기본값(`workspace-write`)·`--cd` 를 그대로 박아 세션을 열기도 전에 `error: unexpected argument` 로 종료됐습니다(소비자는 `provider_options={"sandbox": ""}` 로 회피 중이었습니다). 이제 resume 모드에서는 resume 가 거부하는 옵션(`--sandbox`, `--cd`, `--add-dir`, `--color`, `--profile`, `--profile-v2`, `--local-provider`, `--oss`)을 emit 하지 않습니다. codex-cli 0.146.0 실측 기준 resume 가 받는 `--model`, `--skip-git-repo-check`, `--ephemeral`, `--config`, `--image`, `--output-last-message`, `--output-schema` 등은 그대로 실립니다. 신규 세션 모드의 동작은 변경 없습니다.
+- **codex usage 의 캐시·reasoning 토큰이 항상 0 으로 집계되던 버그 수정.** 어댑터가 `cache_read_tokens`/`cache_write_tokens` 를 찾았지만 codex 가 실제로 보내는 키는 `cached_input_tokens`/`cache_write_input_tokens`/`reasoning_output_tokens` 라, 매칭되는 키가 하나도 없어 캐시 토큰이 전부 유실됐습니다(0.146.0 실측: `{"input_tokens":15059,"cached_input_tokens":11008,"cache_write_input_tokens":0,"output_tokens":5,"reasoning_output_tokens":0}`). 이제 5개 키를 모두 `TaskResult.usage` 로 전달합니다. 옛 키 이름도 fallback 으로 계속 읽습니다. 주의: `cached_input_tokens` 는 `input_tokens` 의 부분집합이고 `reasoning_output_tokens` 는 `output_tokens` 의 부분집합이라 합산하면 중복 계상됩니다.
 - **nack(실패) 태스크의 task/stream 키에도 TTL 적용.** 기존에는 DLQ 로 간 태스크의 키가 무기한 남았습니다. 이제 새 `dlq_ttl` (기본 7일) 로 만료되며, DLQ 조회·재시도에 필요한 시간을 확보하려고 `result_ttl` 보다 길게 잡았습니다.
 
 ### Added
 
 - `RedisBroker(dlq_ttl=...)` 파라미터 (기본 `7 * 24 * 3600`). 실패 태스크의 task/stream 키 보존 기간.
+- **`TokenUsage.reasoning_output_tokens` 필드 (기본 0).** codex 가 보고하는 reasoning 토큰을 담습니다. 기존 필드에 대응되는 자리가 없어 codex 원 키 이름 그대로 추가했습니다. 이 값을 보고하지 않는 provider 에서는 0 입니다.
 
 ### Internal
 
