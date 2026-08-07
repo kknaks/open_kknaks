@@ -100,6 +100,59 @@ class TestResultUsageKeys:
         assert cost_event["cache_write_tokens"] == 0
 
 
+class TestResultCostKey:
+    """Regression: the parser read `cost_usd`, but the CLI reports run cost as
+    `total_cost_usd`, so every claude run was costed at 0.0 and CostMiddleware's
+    budget control never saw a non-zero number.
+
+    Values are from a measured `claude -p --output-format stream-json` result message.
+    """
+
+    def test_total_cost_usd_is_read(self) -> None:
+        line = json.dumps(
+            {
+                "type": "result",
+                "result": "OK",
+                "total_cost_usd": 0.025174000000000002,
+                "usage": {"input_tokens": 2, "cache_read_input_tokens": 24373, "output_tokens": 4},
+                "duration_ms": 1905,
+            }
+        )
+        parsed = parse_stream_json_line(line)
+        cost_event = parsed[0] if isinstance(parsed, list) else parsed
+        assert cost_event["type"] == "cost"
+        assert cost_event["cost_usd"] == pytest.approx(0.025174)
+
+    def test_legacy_cost_usd_still_accepted(self) -> None:
+        line = json.dumps({"type": "result", "result": "OK", "cost_usd": 0.015})
+        parsed = parse_stream_json_line(line)
+        cost_event = parsed[0] if isinstance(parsed, list) else parsed
+        assert cost_event["cost_usd"] == pytest.approx(0.015)
+
+    def test_total_cost_usd_wins_over_legacy_key(self) -> None:
+        line = json.dumps(
+            {"type": "result", "result": "OK", "total_cost_usd": 0.99, "cost_usd": 0.01}
+        )
+        parsed = parse_stream_json_line(line)
+        cost_event = parsed[0] if isinstance(parsed, list) else parsed
+        assert cost_event["cost_usd"] == pytest.approx(0.99)
+
+    def test_zero_total_cost_does_not_fall_through_to_legacy_key(self) -> None:
+        """A genuine 0.0 must be reported as 0.0, not replaced by the fallback."""
+        line = json.dumps(
+            {"type": "result", "result": "OK", "total_cost_usd": 0.0, "cost_usd": 0.42}
+        )
+        parsed = parse_stream_json_line(line)
+        cost_event = parsed[0] if isinstance(parsed, list) else parsed
+        assert cost_event["cost_usd"] == 0.0
+
+    def test_no_cost_key_defaults_to_zero(self) -> None:
+        line = json.dumps({"type": "result", "result": "OK", "usage": {"input_tokens": 5}})
+        parsed = parse_stream_json_line(line)
+        cost_event = parsed[0] if isinstance(parsed, list) else parsed
+        assert cost_event["cost_usd"] == 0.0
+
+
 class TestParseResult:
     def test_result_with_cost_and_text(self) -> None:
         """Result message normally carries both cost and text — both must be emitted."""

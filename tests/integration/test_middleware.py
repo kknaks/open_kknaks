@@ -1,6 +1,7 @@
 """Integration tests for middleware chain."""
 
 import contextlib
+import json
 
 import pytest
 import pytest_asyncio
@@ -16,6 +17,7 @@ from open_kknaks.middleware.rate_limit import RateLimitMiddleware
 from open_kknaks.middleware.retries import RetriesMiddleware
 from open_kknaks.middleware.timeout import TimeoutMiddleware
 from open_kknaks.task import Task, TaskResult, TokenUsage
+from open_kknaks.worker.stream_parser import parse_stream_json_line
 
 
 @pytest_asyncio.fixture
@@ -182,6 +184,52 @@ class TestCostMiddleware:
         assert mw._worker_spent == 0.05
         total = await broker.get_total_cost()
         assert abs(total - 0.05) < 0.001
+
+    @pytest.mark.asyncio
+    async def test_real_result_line_cost_reaches_broker_and_arms_budget(self, broker: RedisBroker) -> None:
+        """Regression: cost parsed from a real result line must reach the broker.
+
+        The parser read `cost_usd` while the CLI reports `total_cost_usd`, so every
+        claude run recorded 0.0 — the accumulator never moved and budget ceilings could
+        not trigger. This walks the real seam: result line -> parser -> TokenUsage (built
+        the way the executor builds it) -> CostMiddleware -> broker.
+        """
+        line = json.dumps(
+            {
+                "type": "result",
+                "result": "OK",
+                "total_cost_usd": 0.025174000000000002,
+                "usage": {"input_tokens": 2, "cache_read_input_tokens": 24373, "output_tokens": 4},
+                "duration_ms": 1905,
+            }
+        )
+        parsed = parse_stream_json_line(line)
+        cost_event = parsed[0] if isinstance(parsed, list) else parsed
+
+        usage = TokenUsage(
+            cost_usd=float(cost_event.get("cost_usd", 0) or 0),
+            input_tokens=int(cost_event.get("input_tokens", 0) or 0),
+            output_tokens=int(cost_event.get("output_tokens", 0) or 0),
+            cache_read_tokens=int(cost_event.get("cache_read_tokens", 0) or 0),
+            cache_write_tokens=int(cost_event.get("cache_write_tokens", 0) or 0),
+        )
+
+        mw = CostMiddleware()
+        await mw.after_process(
+            broker,
+            Task(prompt="test", queue="default"),
+            result=TaskResult(result="OK", usage=usage),
+            exception=None,
+        )
+
+        assert mw._worker_spent == pytest.approx(0.025174)
+        assert await broker.get_total_cost() == pytest.approx(0.025174)
+
+        # ...and the recorded cost is now large enough to actually arm a budget ceiling,
+        # which is the behaviour the zero-cost bug had silently disabled.
+        guarded = CostMiddleware(global_budget_usd=0.02)
+        with pytest.raises(BudgetExceededError):
+            await guarded.before_process(broker, Task(prompt="next"))
 
     @pytest.mark.asyncio
     async def test_worker_budget_exceeded(self, broker: RedisBroker) -> None:

@@ -15,6 +15,20 @@ def strip_ansi(text: str) -> str:
     return _ANSI_RE.sub("", text)
 
 
+def _first_present(obj: Any, *keys: str) -> Any:
+    """Return the value of the first key that is present, else None.
+
+    Presence, not truthiness — a real 0 must not fall through to a fallback key.
+    """
+    if not isinstance(obj, dict):
+        return None
+    for key in keys:
+        value = obj.get(key)
+        if value is not None:
+            return value
+    return None
+
+
 def _usage_int(usage: Any, *keys: str) -> int:
     """Read the first present key from a usage payload, as an int.
 
@@ -74,7 +88,10 @@ def parse_stream_json_line(line: str) -> dict[str, Any] | list[dict[str, Any]] |
     # --- Final result ---
     if msg_type == "result":
         result_text = obj.get("result", "")
-        cost_usd = obj.get("cost_usd")
+        # The CLI reports run cost as `total_cost_usd`; `cost_usd` is kept as a fallback
+        # for builds that emit the older name. Reading only `cost_usd` meant every claude
+        # run was costed at 0.0, which silently disabled CostMiddleware budget control.
+        cost_usd = _first_present(obj, "total_cost_usd", "cost_usd")
         usage = obj.get("usage", {})
 
         result_events: list[dict[str, Any]] = []
@@ -84,7 +101,7 @@ def parse_stream_json_line(line: str) -> dict[str, Any] | list[dict[str, Any]] |
             result_events.append(
                 {
                     "type": "cost",
-                    "cost_usd": cost_usd or 0.0,
+                    "cost_usd": float(cost_usd) if cost_usd is not None else 0.0,
                     "input_tokens": _usage_int(usage, "input_tokens"),
                     "output_tokens": _usage_int(usage, "output_tokens"),
                     "cache_read_tokens": _usage_int(usage, "cache_read_input_tokens", "cache_read_tokens"),
