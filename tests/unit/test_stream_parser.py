@@ -130,18 +130,14 @@ class TestResultCostKey:
         assert cost_event["cost_usd"] == pytest.approx(0.015)
 
     def test_total_cost_usd_wins_over_legacy_key(self) -> None:
-        line = json.dumps(
-            {"type": "result", "result": "OK", "total_cost_usd": 0.99, "cost_usd": 0.01}
-        )
+        line = json.dumps({"type": "result", "result": "OK", "total_cost_usd": 0.99, "cost_usd": 0.01})
         parsed = parse_stream_json_line(line)
         cost_event = parsed[0] if isinstance(parsed, list) else parsed
         assert cost_event["cost_usd"] == pytest.approx(0.99)
 
     def test_zero_total_cost_does_not_fall_through_to_legacy_key(self) -> None:
         """A genuine 0.0 must be reported as 0.0, not replaced by the fallback."""
-        line = json.dumps(
-            {"type": "result", "result": "OK", "total_cost_usd": 0.0, "cost_usd": 0.42}
-        )
+        line = json.dumps({"type": "result", "result": "OK", "total_cost_usd": 0.0, "cost_usd": 0.42})
         parsed = parse_stream_json_line(line)
         cost_event = parsed[0] if isinstance(parsed, list) else parsed
         assert cost_event["cost_usd"] == 0.0
