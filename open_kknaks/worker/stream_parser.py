@@ -15,6 +15,23 @@ def strip_ansi(text: str) -> str:
     return _ANSI_RE.sub("", text)
 
 
+def _usage_int(usage: Any, *keys: str) -> int:
+    """Read the first present key from a usage payload, as an int.
+
+    Claude reports cache accounting as `cache_read_input_tokens` /
+    `cache_creation_input_tokens`; the normalized names this library exposes
+    (`cache_read_tokens` / `cache_write_tokens`) are kept as fallbacks so a CLI build
+    emitting them still works.
+    """
+    if not isinstance(usage, dict):
+        return 0
+    for key in keys:
+        value = usage.get(key)
+        if value is not None:
+            return int(value)
+    return 0
+
+
 def parse_stream_json_line(line: str) -> dict[str, Any] | list[dict[str, Any]] | None:
     """Parse a single stream-json line from Claude Code CLI.
 
@@ -68,10 +85,10 @@ def parse_stream_json_line(line: str) -> dict[str, Any] | list[dict[str, Any]] |
                 {
                     "type": "cost",
                     "cost_usd": cost_usd or 0.0,
-                    "input_tokens": usage.get("input_tokens", 0),
-                    "output_tokens": usage.get("output_tokens", 0),
-                    "cache_read_tokens": usage.get("cache_read_tokens", 0),
-                    "cache_write_tokens": usage.get("cache_write_tokens", 0),
+                    "input_tokens": _usage_int(usage, "input_tokens"),
+                    "output_tokens": _usage_int(usage, "output_tokens"),
+                    "cache_read_tokens": _usage_int(usage, "cache_read_input_tokens", "cache_read_tokens"),
+                    "cache_write_tokens": _usage_int(usage, "cache_creation_input_tokens", "cache_write_tokens"),
                     "duration_ms": obj.get("duration_ms", 0),
                     "session_id": obj.get("session_id"),
                 }

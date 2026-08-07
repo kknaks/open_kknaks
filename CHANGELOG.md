@@ -13,7 +13,13 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 - **`{ns}:stream:{task_id}` 키가 TTL 없이 영구히 쌓이던 누수 수정.** `{ns}:task:{id}` 는 ack 시 `result_ttl` EXPIRE 가 걸렸지만 stream 키는 어떤 경로에서도 만료되지 않아 TTL=-1 로 단조 증가했습니다. ack 시 stream 키에도 `result_ttl` EXPIRE 를 겁니다. 종결(ack/nack) 시점에만 걸므로 소비 중인 스트림이 잘리지 않습니다.
 - **codex resume 제출이 항상 exit 2 로 죽던 버그 수정.** `codex exec resume` 는 `codex exec` 플래그의 진부분집합만 받는데, 어댑터가 resume 모드에서도 sandbox 기본값(`workspace-write`)·`--cd` 를 그대로 박아 세션을 열기도 전에 `error: unexpected argument` 로 종료됐습니다(소비자는 `provider_options={"sandbox": ""}` 로 회피 중이었습니다). 이제 resume 모드에서는 resume 가 거부하는 옵션(`--sandbox`, `--cd`, `--add-dir`, `--color`, `--profile`, `--profile-v2`, `--local-provider`, `--oss`)을 emit 하지 않습니다. codex-cli 0.146.0 실측 기준 resume 가 받는 `--model`, `--skip-git-repo-check`, `--ephemeral`, `--config`, `--image`, `--output-last-message`, `--output-schema` 등은 그대로 실립니다. 신규 세션 모드의 동작은 변경 없습니다.
 - **codex usage 의 캐시·reasoning 토큰이 항상 0 으로 집계되던 버그 수정.** 어댑터가 `cache_read_tokens`/`cache_write_tokens` 를 찾았지만 codex 가 실제로 보내는 키는 `cached_input_tokens`/`cache_write_input_tokens`/`reasoning_output_tokens` 라, 매칭되는 키가 하나도 없어 캐시 토큰이 전부 유실됐습니다(0.146.0 실측: `{"input_tokens":15059,"cached_input_tokens":11008,"cache_write_input_tokens":0,"output_tokens":5,"reasoning_output_tokens":0}`). 이제 5개 키를 모두 `TaskResult.usage` 로 전달합니다. 옛 키 이름도 fallback 으로 계속 읽습니다. 주의: `cached_input_tokens` 는 `input_tokens` 의 부분집합이고 `reasoning_output_tokens` 는 `output_tokens` 의 부분집합이라 합산하면 중복 계상됩니다.
+- **claude usage 의 캐시 토큰이 항상 0 으로 집계되던 버그 수정.** codex 와 같은 결함이 claude 파서에도 있었습니다 — `stream_parser.py` 가 `cache_read_tokens`/`cache_write_tokens` 를 찾았지만 실제 stream-json 의 result 메시지는 `cache_read_input_tokens`/`cache_creation_input_tokens` 를 보냅니다(실측: `{"input_tokens":2,"cache_creation_input_tokens":9101,"cache_read_input_tokens":15272,"output_tokens":4}` → 라이브러리는 0/0 으로 집계). 실제 키를 정규화 필드로 매핑하고, 옛 키 이름은 fallback 으로 계속 읽습니다.
+
 - **nack(실패) 태스크의 task/stream 키에도 TTL 적용.** 기존에는 DLQ 로 간 태스크의 키가 무기한 남았습니다. 이제 새 `dlq_ttl` (기본 7일) 로 만료되며, DLQ 조회·재시도에 필요한 시간을 확보하려고 `result_ttl` 보다 길게 잡았습니다.
+
+### Changed
+
+- **`TokenUsage` 의 provider 간 집계 의미를 문서화.** 필드 이름은 정규화돼 있지만 회계 방식이 다릅니다 — claude 는 `cache_read_tokens`/`cache_write_tokens` 가 `input_tokens` 와 **별개 축**(총 입력 ≈ input + cache_read + cache_write)이고, codex 는 `cache_read_tokens` 가 `input_tokens` 의 **부분집합**(`reasoning_output_tokens` 도 `output_tokens` 의 부분집합)입니다. provider 를 가로질러 합산할 때 이 차이를 고려해야 합니다.
 
 ### Added
 

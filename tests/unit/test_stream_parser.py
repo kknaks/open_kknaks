@@ -22,6 +22,84 @@ class TestStripAnsi:
         assert strip_ansi("") == ""
 
 
+class TestResultUsageKeys:
+    """Regression: the parser looked up `cache_read_tokens`/`cache_write_tokens`, which
+    the Claude CLI never emits, so cache accounting was always 0.
+
+    Payloads are verbatim `claude -p --output-format stream-json` result-message usage.
+    """
+
+    def test_real_claude_usage_keys_are_mapped(self) -> None:
+        line = json.dumps(
+            {
+                "type": "result",
+                "result": "OK",
+                "usage": {
+                    "input_tokens": 2,
+                    "cache_creation_input_tokens": 9101,
+                    "cache_read_input_tokens": 15272,
+                    "output_tokens": 4,
+                },
+                "duration_ms": 1905,
+                "session_id": "abc-123",
+            }
+        )
+        parsed = parse_stream_json_line(line)
+        assert isinstance(parsed, list)
+        cost_event = parsed[0]
+        assert cost_event["input_tokens"] == 2
+        assert cost_event["output_tokens"] == 4
+        # cache_creation -> write, cache_read -> read. Previously both 0.
+        assert cost_event["cache_write_tokens"] == 9101
+        assert cost_event["cache_read_tokens"] == 15272
+
+    def test_zero_cache_creation_is_preserved_not_treated_as_missing(self) -> None:
+        """A real 0 must not fall through to the legacy key lookup."""
+        line = json.dumps(
+            {
+                "type": "result",
+                "result": "OK",
+                "usage": {
+                    "input_tokens": 2,
+                    "cache_creation_input_tokens": 0,
+                    "cache_read_input_tokens": 24373,
+                    "output_tokens": 4,
+                    "cache_write_tokens": 999,
+                },
+            }
+        )
+        parsed = parse_stream_json_line(line)
+        cost_event = parsed[0] if isinstance(parsed, list) else parsed
+        assert cost_event["cache_write_tokens"] == 0
+        assert cost_event["cache_read_tokens"] == 24373
+
+    def test_legacy_usage_key_names_still_accepted(self) -> None:
+        line = json.dumps(
+            {
+                "type": "result",
+                "result": "OK",
+                "usage": {
+                    "input_tokens": 500,
+                    "output_tokens": 200,
+                    "cache_read_tokens": 100,
+                    "cache_write_tokens": 50,
+                },
+            }
+        )
+        parsed = parse_stream_json_line(line)
+        cost_event = parsed[0] if isinstance(parsed, list) else parsed
+        assert cost_event["cache_read_tokens"] == 100
+        assert cost_event["cache_write_tokens"] == 50
+
+    def test_missing_usage_keys_default_to_zero(self) -> None:
+        line = json.dumps({"type": "result", "result": "OK", "usage": {"input_tokens": 5}})
+        parsed = parse_stream_json_line(line)
+        cost_event = parsed[0] if isinstance(parsed, list) else parsed
+        assert cost_event["input_tokens"] == 5
+        assert cost_event["cache_read_tokens"] == 0
+        assert cost_event["cache_write_tokens"] == 0
+
+
 class TestParseResult:
     def test_result_with_cost_and_text(self) -> None:
         """Result message normally carries both cost and text — both must be emitted."""

@@ -30,7 +30,17 @@ class Priority(int, Enum):
 
 
 class TokenUsage(BaseModel):
-    """Token usage and cost information from a Claude run."""
+    """Token usage and cost information from a provider run.
+
+    Field names are normalized across providers, but the *accounting* behind them is
+    not — do not sum these across providers without accounting for the difference:
+
+    - **claude**: `cache_read_tokens` / `cache_write_tokens` are a separate axis from
+      `input_tokens`. Total input billed ≈ input + cache_read + cache_write.
+    - **codex**: `cache_read_tokens` (`cached_input_tokens`) is a *subset* of
+      `input_tokens`, and `reasoning_output_tokens` is a subset of `output_tokens`.
+      Adding them double-counts.
+    """
 
     model_config = ConfigDict(use_enum_values=True)
 
